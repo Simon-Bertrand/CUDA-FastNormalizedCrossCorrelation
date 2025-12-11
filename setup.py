@@ -1,26 +1,21 @@
 
 import os
 import subprocess
-nvcc_path = subprocess.check_output(['where', 'nvcc'], shell=True, text=True).strip().split('\n')[0]
-cuda_home = os.path.dirname(os.path.dirname(nvcc_path))
-# Définir dans l'environnement avant l'import de torch
-os.environ['CUDA_HOME'] = cuda_home
-# Forcer la mise à jour pour les sous-processus
-import sys
-if sys.platform == 'win32':
-    import ctypes
-    from ctypes import wintypes
-    kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
-    kernel32.SetEnvironmentVariableW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR]
-    kernel32.SetEnvironmentVariableW('CUDA_HOME', cuda_home)
-print(f"Auto-detected CUDA_HOME: {cuda_home}")
-
-from torch.utils.cpp_extension import CUDAExtension, BuildExtension
-from setuptools import setup
-
 import glob
+import sys
+import shutil
+from setuptools import setup
+from torch.utils.cpp_extension import CUDAExtension, CppExtension, BuildExtension
 
-
+# Detect CUDA
+nvcc_path = shutil.which('nvcc')
+cuda_home = None
+if nvcc_path:
+    cuda_home = os.path.dirname(os.path.dirname(nvcc_path))
+    os.environ['CUDA_HOME'] = cuda_home
+    print(f"Auto-detected CUDA_HOME: {cuda_home}")
+else:
+    print("CUDA (nvcc) not found. Building in CPU-only mode.")
 
 ext_modules = []
 cuda_kernels_dir = 'cuda_kernels'
@@ -29,29 +24,64 @@ if os.path.exists(cuda_kernels_dir):
     for kernel_dir in sorted(os.listdir(cuda_kernels_dir)):
         kernel_path = os.path.join(cuda_kernels_dir, kernel_dir)
         if os.path.isdir(kernel_path):
-            # Chercher tous les fichiers .cu dans le dossier et ses sous-dossiers
-            cu_files = glob.glob(os.path.join(kernel_path, '**', '*.cu'), recursive=True)
-            if not cu_files:
-                # Si pas trouvé récursivement, chercher directement dans le dossier
-                cu_files = glob.glob(os.path.join(kernel_path, '*.cu'))
+            # Sources
+            sources = []
+
+            # Helper to find files
+            def find_files(pattern):
+                files = glob.glob(os.path.join(kernel_path, '**', pattern), recursive=True)
+                if not files:
+                     files = glob.glob(os.path.join(kernel_path, pattern))
+                return files
+
+            cu_files = find_files('*.cu')
+            cpp_files = find_files('*.cpp')
+
+            # Determine if we can build with CUDA
+            has_cuda_code = len(cu_files) > 0
+            build_with_cuda = has_cuda_code and (cuda_home is not None)
+
+            # Construct sources list
+            sources.extend(cpp_files)
+            if build_with_cuda:
+                sources.extend(cu_files)
+
+            if not sources:
+                continue
+
+            libraries = []
+            define_macros = []
+            extra_compile_args = {}
+
+            if build_with_cuda:
+                define_macros.append(('WITH_CUDA', None))
+                libraries.append('cufft')
+
+                # Check for cufft in sources if needed (legacy check)
+                # But we know we use it.
+            else:
+                 # If we have CUDA files but no CUDA compiler, we skip them.
+                 # Warn user
+                 if has_cuda_code:
+                     print(f"Warning: CUDA files found in {kernel_dir} but nvcc is missing. Compiling CPU only.")
             
-            if cu_files:
-                # Vérifier si cuFFT est nécessaire (chercher #include <cufft.h>)
-                libraries = []
-                for cu_file in cu_files:
-                    try:
-                        with open(cu_file, 'r', encoding='utf-8') as f:
-                            content = f.read()
-                            if '#include <cufft.h>' in content or '#include "cufft.h"' in content:
-                                libraries = ['cufft']
-                                break
-                    except Exception as e:
-                        print(f"Warning: Could not read {cu_file}: {e}")
+            # Create Extension
+            ext_name = kernel_dir
+            if build_with_cuda:
+                ext_modules.append(CUDAExtension(
+                    ext_name,
+                    sources,
+                    libraries=libraries,
+                    define_macros=define_macros
+                ))
+            else:
+                ext_modules.append(CppExtension(
+                    ext_name,
+                    sources,
+                    define_macros=define_macros
+                ))
                 
-                # Le nom de l'extension est le nom du dossier
-                ext_name = kernel_dir
-                ext_modules.append(CUDAExtension(ext_name, cu_files, libraries=libraries))
-                print(f"Found CUDA extension: {ext_name} with {len(cu_files)} file(s)")
+            print(f"Added extension: {ext_name} (CUDA={'On' if build_with_cuda else 'Off'})")
 
 setup(
     name='cuda_kernels',

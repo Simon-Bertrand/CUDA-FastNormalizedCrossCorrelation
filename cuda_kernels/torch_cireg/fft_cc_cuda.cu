@@ -4,12 +4,13 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <cuComplex.h>
 #include <map>
-#include <list> // Added for LRU Cache
+#include <list>
 #include <mutex>
 #include <tuple>
 #include <vector>
 #include <iostream>
 #include <cmath> 
+#include "fft_cc.h"
 
 // ==================================================================================
 // MACROS & ERROR HANDLING
@@ -365,12 +366,12 @@ torch::Tensor fft_cross_correlation_impl(
 }
 
 // ==================================================================================
-// 1. FUNCTIONAL API
+// 1. FUNCTIONAL API (CUDA)
 // ==================================================================================
-torch::Tensor fft_cross_correlation(
+torch::Tensor fft_cross_correlation_cuda(
     torch::Tensor image, 
     torch::Tensor kernel, 
-    bool normalize = false
+    bool normalize
 ) {
     int img_h = image.size(-2);
     int img_w = image.size(-1);
@@ -384,7 +385,7 @@ torch::Tensor fft_cross_correlation(
 }
 
 // ==================================================================================
-// 2. CLASS API (Dynamic Batch Handling with LRU Cache of 2)
+// 2. CLASS API HELPERS
 // ==================================================================================
 
 struct ClassPlanPair {
@@ -392,17 +393,19 @@ struct ClassPlanPair {
     cufftHandle c2r;
 };
 
-class VeryFastNormalizedCrossCorrelation {
+// We define the logic for class-based planning here but need to expose it via an opaque pointer.
+// To match the `VeryFastNormalizedCrossCorrelation` usage in binding.cpp, we would need
+// to expose create/destroy/forward_cuda.
+
+class CudaImpl {
 public:
-    // Init: Capture fixed dimensions
-    VeryFastNormalizedCrossCorrelation(int img_h, int img_w, int ker_h, int ker_w, bool normalize) 
+    CudaImpl(int img_h, int img_w, int ker_h, int ker_w, bool normalize)
         : img_h_(img_h), img_w_(img_w), 
           ker_h_(ker_h), ker_w_(ker_w), 
           normalize_(normalize) 
     {}
 
-    // Cleanup: Destroy all plans in cache
-    ~VeryFastNormalizedCrossCorrelation() {
+    ~CudaImpl() {
         for (auto& entry : plan_cache_) {
             cufftDestroy(entry.second.r2c);
             cufftDestroy(entry.second.c2r);
@@ -411,17 +414,8 @@ public:
     }
 
     torch::Tensor forward(torch::Tensor image, torch::Tensor kernel) {
-        TORCH_CHECK(image.is_cuda() && kernel.is_cuda(), "Inputs must be on CUDA.");
-        TORCH_CHECK(image.size(-2) == img_h_ && image.size(-1) == img_w_, 
-                    "Image dims mismatch class init. Expected ", img_h_, "x", img_w_);
-        TORCH_CHECK(kernel.size(-2) == ker_h_ && kernel.size(-1) == ker_w_, 
-                    "Kernel dims mismatch class init. Expected ", ker_h_, "x", ker_w_);
-
         int current_batch_size = image.numel() / (img_h_ * img_w_);
-
-        // Get plans (Cached or New)
         ClassPlanPair plans = get_or_create_plans(current_batch_size);
-
         return fft_cross_correlation_impl(
             image, kernel, normalize_, 
             plans.r2c, plans.c2r, 
@@ -434,25 +428,19 @@ private:
     int ker_h_, ker_w_;
     bool normalize_;
     
-    // LRU Cache Implementation:
-    // List stores pairs of (batch_size, Plans). 
-    // Front is MRU (Most Recently Used), Back is LRU.
     std::list<std::pair<int, ClassPlanPair>> plan_cache_;
     std::mutex cache_mutex_;
 
     ClassPlanPair get_or_create_plans(int batch_size) {
         std::lock_guard<std::mutex> lock(cache_mutex_);
         
-        // 1. Search in List (Linear scan is fast for size 2)
         for (auto it = plan_cache_.begin(); it != plan_cache_.end(); ++it) {
             if (it->first == batch_size) {
-                // Hit! Move to Front (MRU)
                 plan_cache_.splice(plan_cache_.begin(), plan_cache_, it);
                 return it->second;
             }
         }
 
-        // 2. Miss! Create New Plans
         ClassPlanPair new_plans;
         
         int n[] = {img_h_, img_w_};
@@ -480,10 +468,8 @@ private:
                                   onembed_c2r, 1, odist_c2r, 
                                   CUFFT_C2R, total_layers));
 
-        // 3. Insert at Front
         plan_cache_.push_front({batch_size, new_plans});
 
-        // 4. Evict LRU if size > 2
         if (plan_cache_.size() > 2) {
             auto& last_entry = plan_cache_.back();
             cufftDestroy(last_entry.second.r2c);
@@ -495,18 +481,16 @@ private:
     }
 };
 
-// ==================================================================================
-// PYBIND11 MODULE
-// ==================================================================================
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("fft_cross_correlation", &fft_cross_correlation, 
-          "High-Performance FFT Cross-Correlation / ZNCC",
-          py::arg("image"), py::arg("kernel"), py::arg("normalize") = false);
+// C-style interface for the opaque pointer interaction
+void* create_cuda_impl(int img_h, int img_w, int ker_h, int ker_w, bool normalize) {
+    return new CudaImpl(img_h, img_w, ker_h, ker_w, normalize);
+}
 
-    py::class_<VeryFastNormalizedCrossCorrelation>(m, "VeryFastNormalizedCrossCorrelation")
-        .def(py::init<int, int, int, int, bool>(), 
-             py::arg("img_h"), py::arg("img_w"), 
-             py::arg("ker_h"), py::arg("ker_w"), py::arg("normalize")=true)
-        .def("forward", &VeryFastNormalizedCrossCorrelation::forward, 
-             py::arg("image"), py::arg("kernel"));
+void destroy_cuda_impl(void* impl) {
+    if (impl) delete static_cast<CudaImpl*>(impl);
+}
+
+torch::Tensor forward_cuda_impl(void* impl, torch::Tensor image, torch::Tensor kernel) {
+    TORCH_CHECK(impl != nullptr, "CUDA impl is null");
+    return static_cast<CudaImpl*>(impl)->forward(image, kernel);
 }
