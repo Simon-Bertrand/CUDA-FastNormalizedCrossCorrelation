@@ -5,3 +5,32 @@ To complete the implementation:
 - Implement ZNCC autograd backward GPU and CPU (hardest)
 
 They are available (as slower vesion) in Python with : https://github.com/Simon-Bertrand/FastCrossCorr-PyTorch
+
+
+In this implementation: we don't use integral images to compute the denominator of the ZNCC to avoid possible numerical precision issue that
+can happens with the double cumsum operator on float32.
+
+Instead, we stack all data needed for the ZNCC (I, I², T, 1.) and do the whole Fourier hadamard product using a single cuFFT call.
+The ZNCC can be wrote :
+
+$$
+ZNCC(\mathbf{x})
+=
+\frac{
+    % Numerator: Correlation of Image with Centered Template
+    % Note: The term (I - \mu_I) simplifies to I here because \sum (T-\mu_T) = 0.
+    (I \star (T-\mu_T))(\mathbf{x})
+}{
+    \sqrt{
+        \left[
+            % Image Centered Energy (Variance * N)
+            (I^2 \star \mathbf{1})(\mathbf{x})
+            -
+            \frac{(I \star \mathbf{1})(\mathbf{x})^2}{N}
+        \right]
+        \cdot
+        % Template Centered Energy (must be squared norm)
+        ||T-\mu_T||^2
+    }
+}
+$$
