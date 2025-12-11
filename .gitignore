@@ -4,9 +4,9 @@
 
 
 TODO.md
-lab/** */
+lab
 **/*.ipynb
-
+.vscode
 **/*.pyo
 **/*.pyd
 **/.Python
