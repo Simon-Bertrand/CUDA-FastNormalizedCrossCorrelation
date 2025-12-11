@@ -13,7 +13,7 @@ can happens with the double cumsum operator on float32.
 Instead, we stack all data needed for the ZNCC (I, I², T, 1.) and do the whole Fourier hadamard product using a single cuFFT call.
 The ZNCC can be wrote :
 
-$$
+```math
 ZNCC(\mathbf{x})
 =
 \frac{
@@ -33,4 +33,4 @@ ZNCC(\mathbf{x})
         ||T-\mu_T||^2
     }
 }
-$$
+```
