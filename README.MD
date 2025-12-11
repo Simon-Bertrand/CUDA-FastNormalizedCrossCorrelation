@@ -52,3 +52,7 @@ ZNCC'(\mathbf{x}) = \frac{(I \star \hat{T})(\mathbf{x})}
 ```
 This rewritten equation highlights that, after standardizing the template, the denominator only normalizes with respect to the local statistics of the image I and the template only enters linearly in the numerator as a normalized filter.
 We can then parallelize the three cross-correlation operations.
+Hadamard: Multiply them in the frequency domain (complex multiplication).
+- Channel 1: $\mathcal{F}(I) \cdot \mathcal{F}(\hat{T})$
+- Channel 2: $\mathcal{F}(I^2) \cdot \mathcal{F}(\mathbf{1})$
+- Channel 3: $\mathcal{F}(I) \cdot \mathcal{F}(\mathbf{1})$
