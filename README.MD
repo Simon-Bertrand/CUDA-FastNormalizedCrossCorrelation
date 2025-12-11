@@ -30,7 +30,7 @@ ZNCC(\mathbf{x})
         \right]
         \cdot
         % Template Centered Energy (must be squared norm)
-        ||T-\mu_T||^2
-    }
+        
+    } ||T-\mu_T||_2
 }
 ```
