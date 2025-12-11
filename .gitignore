@@ -6,3 +6,17 @@
 TODO.md
 lab/** */
 **/*.ipynb
+
+**/*.pyo
+**/*.pyd
+**/.Python
+**/build
+**/dist
+**/.eggs
+**/*.so
+**/*.dll
+**/*.exp
+**/*.lib
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
