@@ -51,3 +51,4 @@ ZNCC'(\mathbf{x}) = \frac{(I \star \hat{T})(\mathbf{x})}
 }
 ```
 This rewritten equation highlights that, after standardizing the template, the denominator only normalizes with respect to the local statistics of the image I and the template only enters linearly in the numerator as a normalized filter.
+We can then parallelize the three cross-correlation operations.
