@@ -34,3 +34,20 @@ ZNCC(\mathbf{x})
     } ||T-\mu_T||_2
 }
 ```
+In practice, we can directly compute if we standardize the template  T (i.e., enforce zero mean and unit L2 norm): 
+```math
+\hat{T} = \frac{T - \mu_T}{||T - \mu_T||_2}
+```
+Then
+
+```math
+ZNCC'(\mathbf{x}) = \frac{(I \star \hat{T})(\mathbf{x})}
+{
+    \sqrt{
+        (I^2 \star \mathbf{1})(\mathbf{x})
+        -
+        \frac{(I \star \mathbf{1})(\mathbf{x})^2}{N}
+    }
+}
+```
+This rewritten equation highlights that, after standardizing the template, the denominator only normalizes with respect to the local statistics of the image I and the template only enters linearly in the numerator as a normalized filter.
