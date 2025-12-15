@@ -12,10 +12,11 @@ std::vector<int64_t> change_h_w_shapes(const torch::Tensor& tensor, const int64_
     return out;
 }
 
-torch::Tensor fft_cross_correlation_cpu(
+template <typename scalar_t>
+torch::Tensor fft_cross_correlation_cpu_impl(
     torch::Tensor image,
     torch::Tensor kernel,
-    bool normalize = false
+    bool normalize
 ) {
     // 1. Checks and Flattening
     TORCH_CHECK(image.dim() >= 2, "Image must have at least 2 dimensions");
@@ -60,7 +61,7 @@ torch::Tensor fft_cross_correlation_cpu(
     // Fill Plane 3: Ones (ZNCC)
 
     torch::Tensor ker_norms;
-    float sqrt_N = 1.0f;
+    scalar_t sqrt_N = static_cast<scalar_t>(1.0);
 
     // Prepare Kernel Data
     torch::Tensor ker_to_pack;
@@ -70,7 +71,7 @@ torch::Tensor fft_cross_correlation_cpu(
         auto k_centered = ker_flat - k_mean;
         ker_norms = k_centered.norm(2, {1, 2});
         ker_to_pack = k_centered;
-        sqrt_N = std::sqrt((float)(h * w));
+        sqrt_N = std::sqrt(static_cast<scalar_t>(h * w));
 
         // Plane 1: Image^2
         // Calculate square directly into the arena to avoid temporary allocation
@@ -81,7 +82,7 @@ torch::Tensor fft_cross_correlation_cpu(
         arena.select(1, 2).index_put_({Slice(), Slice(0, h), Slice(0, w)}, ker_to_pack);
 
         // Plane 3: Ones (Padded)
-        arena.select(1, 3).index_put_({Slice(), Slice(0, h), Slice(0, w)}, 1.0f);
+        arena.select(1, 3).index_put_({Slice(), Slice(0, h), Slice(0, w)}, static_cast<scalar_t>(1.0));
 
     } else {
         // Plane 1: Kernel (Padded)
@@ -188,15 +189,15 @@ torch::Tensor fft_cross_correlation_cpu(
         auto sum_i  = result_spatial.select(1, 1);
         auto sum_i2 = result_spatial.select(1, 2);
 
-        float N = (float)(h * w);
+        scalar_t N = static_cast<scalar_t>(h * w);
         auto var_term = N * sum_i2 - sum_i.square();
         var_term = torch::relu(var_term);
 
         auto inv_std = torch::rsqrt(var_term);
-        auto mask = (var_term < 1e-5) | (ker_norms.view({batch_size, 1, 1}) < 1e-6);
+        auto mask = (var_term < static_cast<scalar_t>(1e-5)) | (ker_norms.view({batch_size, 1, 1}) < static_cast<scalar_t>(1e-6));
 
-        final_out = (num * sqrt_N) * inv_std * (1.0f / ker_norms.view({batch_size, 1, 1}));
-        final_out.index_put_({mask}, 0.0f);
+        final_out = (num * sqrt_N) * inv_std * (static_cast<scalar_t>(1.0) / ker_norms.view({batch_size, 1, 1}));
+        final_out.index_put_({mask}, static_cast<scalar_t>(0.0));
     } else {
         final_out = result_spatial.select(1, 0);
     }
@@ -204,4 +205,14 @@ torch::Tensor fft_cross_correlation_cpu(
     final_out = final_out.slice(1, 0, crop_h).slice(2, 0, crop_w);
 
     return final_out.reshape(change_h_w_shapes(image, crop_h, crop_w));
+}
+
+torch::Tensor fft_cross_correlation_cpu(
+    torch::Tensor image,
+    torch::Tensor kernel,
+    bool normalize = false
+) {
+    return AT_DISPATCH_FLOATING_TYPES(image.scalar_type(), "fft_cross_correlation_cpu", [&] {
+        return fft_cross_correlation_cpu_impl<scalar_t>(image, kernel, normalize);
+    });
 }

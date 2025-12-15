@@ -32,6 +32,8 @@
     } \
   } while(0)
 
+// Tuple: (height, width, batch_size, type_id)
+// type_id distinguishes between R2C vs D2Z (for float vs double)
 using PlanKey = std::tuple<int, int, int, int>;
 
 // --- Helper: Reshape Output ---
@@ -44,7 +46,42 @@ std::vector<int64_t> change_h_w_shapes(const torch::Tensor& tensor, const int64_
 }
 
 // ==================================================================================
-// INFRASTRUCTURE: PLAN CACHE (For Functional Interface - Global Singleton)
+// TRAITS FOR FLOAT VS DOUBLE
+// ==================================================================================
+template <typename T> struct FFTTraits;
+
+template <> struct FFTTraits<float> {
+    using ComplexType = cufftComplex;
+    using RealType = float;
+    static const cufftType R2C_TYPE = CUFFT_R2C;
+    static const cufftType C2R_TYPE = CUFFT_C2R;
+
+    __device__ static ComplexType make_complex(float r, float i) {
+        return make_cuComplex(r, i);
+    }
+    __device__ static float real(ComplexType c) { return cuCrealf(c); }
+    __device__ static float imag(ComplexType c) { return cuCimagf(c); }
+    __device__ static float rsqrt(float x) { return rsqrtf(x); }
+    __device__ static float fmax(float x, float y) { return fmaxf(x, y); }
+};
+
+template <> struct FFTTraits<double> {
+    using ComplexType = cufftDoubleComplex;
+    using RealType = double;
+    static const cufftType R2C_TYPE = CUFFT_D2Z;
+    static const cufftType C2R_TYPE = CUFFT_Z2D;
+
+    __device__ static ComplexType make_complex(double r, double i) {
+        return make_cuDoubleComplex(r, i);
+    }
+    __device__ static double real(ComplexType c) { return cuCreal(c); }
+    __device__ static double imag(ComplexType c) { return cuCimag(c); }
+    __device__ static double rsqrt(double x) { return ::rsqrt(x); } // standard rsqrt might be float, use generic or 1/sqrt
+    __device__ static double fmax(double x, double y) { return fmax(x, y); }
+};
+
+// ==================================================================================
+// INFRASTRUCTURE: PLAN CACHE
 // ==================================================================================
 class CuFFTPlanCache {
 public:
@@ -52,7 +89,9 @@ public:
     
     cufftHandle get_plan(int height, int width, int batch_size, cufftType type) {
         std::lock_guard<std::mutex> lock(mutex_);
-        int type_id = (type == CUFFT_R2C) ? 0 : 1; 
+        // Map cufftType to an integer ID for the key
+        // We can just use the enum value directly as int
+        int type_id = (int)type;
         PlanKey key = std::make_tuple(height, width, batch_size, type_id);
         
         if (cache_.find(key) != cache_.end()) return cache_[key];
@@ -63,14 +102,21 @@ public:
         int inembed[2]  = {height, width};
         int onembed[2]  = {height, width_complex};
 
-        int idist = (type == CUFFT_R2C) ? height * width : height * width_complex;
-        int odist = (type == CUFFT_R2C) ? height * width_complex : height * width;
+        // Determine dists based on type
+        bool is_r2c = (type == CUFFT_R2C || type == CUFFT_D2Z);
 
-        if (type == CUFFT_R2C) {
+        int idist, odist;
+        if (is_r2c) {
+            idist = height * width;
+            odist = height * width_complex;
             CUFFT_CHECK(cufftPlanMany(&plan, 2, n, inembed, 1, idist, onembed, 1, odist, type, batch_size));
         } else {
+            idist = height * width_complex;
+            odist = height * width;
+            // For C2R/Z2D, input is complex, output is real
             CUFFT_CHECK(cufftPlanMany(&plan, 2, n, onembed, 1, idist, inembed, 1, odist, type, batch_size));
         }
+
         cache_[key] = plan;
         return plan;
     }
@@ -83,9 +129,10 @@ private:
 // CUDA KERNELS
 // ==================================================================================
 
+template <typename scalar_t>
 __global__ void pack_image_kernel(
-    const float* __restrict__ img_ptr, 
-    float* __restrict__ arena_ptr,
+    const scalar_t* __restrict__ img_ptr,
+    scalar_t* __restrict__ arena_ptr,
     int img_h, int img_w, 
     int img_stride, int arena_stride,
     bool use_zncc,
@@ -102,7 +149,7 @@ __global__ void pack_image_kernel(
     int stack_depth = use_zncc ? 4 : 2;
     int batch_base = b * (stack_depth * arena_stride) + idx;
     
-    float px_val = img_ptr[b * img_stride + idx];
+    scalar_t px_val = img_ptr[b * img_stride + idx];
     
     arena_ptr[batch_base] = px_val; 
     if (use_zncc) {
@@ -110,9 +157,10 @@ __global__ void pack_image_kernel(
     }
 }
 
+template <typename scalar_t>
 __global__ void pack_template_kernel(
-    const float* __restrict__ ker_ptr,
-    float* __restrict__ arena_ptr,
+    const scalar_t* __restrict__ ker_ptr,
+    scalar_t* __restrict__ arena_ptr,
     int kernel_h, int kernel_w,
     int img_w, 
     int ker_stride, int arena_stride,
@@ -134,23 +182,27 @@ __global__ void pack_template_kernel(
     int stack_depth = use_zncc ? 4 : 2;
     int batch_base = b * (stack_depth * arena_stride) + arena_idx;
 
-    float k_val = ker_ptr[b * ker_stride + idx];
+    scalar_t k_val = ker_ptr[b * ker_stride + idx];
 
     if (use_zncc) {
         arena_ptr[batch_base + 2 * arena_stride] = k_val;
-        arena_ptr[batch_base + 3 * arena_stride] = 1.0f;
+        arena_ptr[batch_base + 3 * arena_stride] = static_cast<scalar_t>(1.0);
     } else {
         arena_ptr[batch_base + 1 * arena_stride] = k_val;
     }
 }
 
+template <typename scalar_t>
 __global__ void spectral_math_kernel(
-    cuComplex* __restrict__ data_ptr, 
-    float scale, 
+    typename FFTTraits<scalar_t>::ComplexType* __restrict__ data_ptr,
+    scalar_t scale,
     int plane_stride, 
     bool use_zncc,
     int batch_offset, int batch_global
 ) {
+    using ComplexT = typename FFTTraits<scalar_t>::ComplexType;
+    using Traits = FFTTraits<scalar_t>;
+
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int local_b = blockIdx.z;
     int b = local_b + batch_offset;
@@ -161,37 +213,44 @@ __global__ void spectral_math_kernel(
     int stack_depth = use_zncc ? 4 : 2;
     int base = b * stack_depth * plane_stride;
 
-    auto cmul_conj_scale = [&](cuComplex x, cuComplex y) {
-        float r = cuCrealf(x)*cuCrealf(y) + cuCimagf(x)*cuCimagf(y);
-        float i = cuCimagf(x)*cuCrealf(y) - cuCrealf(x)*cuCimagf(y);
-        return make_cuComplex(r*scale, i*scale);
+    auto cmul_conj_scale = [&](ComplexT x, ComplexT y) {
+        scalar_t xr = Traits::real(x);
+        scalar_t xi = Traits::imag(x);
+        scalar_t yr = Traits::real(y);
+        scalar_t yi = Traits::imag(y);
+
+        scalar_t r = xr*yr + xi*yi;
+        scalar_t i = xi*yr - xr*yi;
+        return Traits::make_complex(r*scale, i*scale);
     };
 
     if (use_zncc) {
-        cuComplex I  = data_ptr[base + 0 * plane_stride + idx];
-        cuComplex I2 = data_ptr[base + 1 * plane_stride + idx];
-        cuComplex T  = data_ptr[base + 2 * plane_stride + idx];
-        cuComplex O  = data_ptr[base + 3 * plane_stride + idx];
+        ComplexT I  = data_ptr[base + 0 * plane_stride + idx];
+        ComplexT I2 = data_ptr[base + 1 * plane_stride + idx];
+        ComplexT T  = data_ptr[base + 2 * plane_stride + idx];
+        ComplexT O  = data_ptr[base + 3 * plane_stride + idx];
         
         data_ptr[base + 0 * plane_stride + idx] = cmul_conj_scale(I, T); 
         data_ptr[base + 1 * plane_stride + idx] = cmul_conj_scale(I, O);
         data_ptr[base + 2 * plane_stride + idx] = cmul_conj_scale(I2, O);
     } else {
-        cuComplex I = data_ptr[base + 0 * plane_stride + idx];
-        cuComplex T = data_ptr[base + 1 * plane_stride + idx];
+        ComplexT I = data_ptr[base + 0 * plane_stride + idx];
+        ComplexT T = data_ptr[base + 1 * plane_stride + idx];
         data_ptr[base + 0 * plane_stride + idx] = cmul_conj_scale(I, T);
     }
 }
 
+template <typename scalar_t>
 __global__ void finalize_kernel(
-    const float* __restrict__ arena_ptr,
-    float* __restrict__ out_ptr,
-    const float* __restrict__ ker_norms, 
-    float sqrt_N,                        
+    const scalar_t* __restrict__ arena_ptr,
+    scalar_t* __restrict__ out_ptr,
+    const scalar_t* __restrict__ ker_norms,
+    scalar_t sqrt_N,
     int plane_stride, 
     bool use_zncc,
     int batch_offset, int batch_global
 ) {
+    using Traits = FFTTraits<scalar_t>;
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int local_b = blockIdx.z;
     int b = local_b + batch_offset;
@@ -203,20 +262,20 @@ __global__ void finalize_kernel(
 
     if (use_zncc) {
         int base = b * (4 * plane_stride); 
-        float num    = arena_ptr[base + 0 * plane_stride + idx];
-        float sum_i  = arena_ptr[base + 1 * plane_stride + idx];
-        float sum_i2 = arena_ptr[base + 2 * plane_stride + idx];
+        scalar_t num    = arena_ptr[base + 0 * plane_stride + idx];
+        scalar_t sum_i  = arena_ptr[base + 1 * plane_stride + idx];
+        scalar_t sum_i2 = arena_ptr[base + 2 * plane_stride + idx];
 
-        float N = sqrt_N * sqrt_N;
-        float var_term = N * sum_i2 - (sum_i * sum_i);
-        var_term = fmaxf(var_term, 0.0f);
+        scalar_t N = sqrt_N * sqrt_N;
+        scalar_t var_term = N * sum_i2 - (sum_i * sum_i);
+        var_term = Traits::fmax(var_term, static_cast<scalar_t>(0.0));
         
-        float t_norm = ker_norms[b];
+        scalar_t t_norm = ker_norms[b];
 
-        if (var_term < 1e-5f || t_norm < 1e-6f) {
-            out_ptr[out_base + idx] = 0.0f; 
+        if (var_term < static_cast<scalar_t>(1e-5) || t_norm < static_cast<scalar_t>(1e-6)) {
+            out_ptr[out_base + idx] = static_cast<scalar_t>(0.0);
         } else {
-            out_ptr[out_base + idx] = (num * sqrt_N) * rsqrtf(var_term) * (1.0f / t_norm);
+            out_ptr[out_base + idx] = (num * sqrt_N) * Traits::rsqrt(var_term) * (static_cast<scalar_t>(1.0) / t_norm);
         }
     } else {
         int base = b * (2 * plane_stride);
@@ -225,8 +284,9 @@ __global__ void finalize_kernel(
 }
 
 // ==================================================================================
-// SHARED IMPLEMENTATION
+// SHARED IMPLEMENTATION TEMPLATE
 // ==================================================================================
+template <typename scalar_t>
 torch::Tensor fft_cross_correlation_impl(
     torch::Tensor image, 
     torch::Tensor kernel, 
@@ -237,6 +297,9 @@ torch::Tensor fft_cross_correlation_impl(
 ) {
     TORCH_CHECK(image.is_cuda() && kernel.is_cuda(), "Inputs must be on CUDA.");
     TORCH_CHECK(image.is_contiguous() && kernel.is_contiguous(), "Inputs must be contiguous.");
+
+    using Traits = FFTTraits<scalar_t>;
+    using ComplexT = typename Traits::ComplexType;
 
     int img_h = image.size(-2);
     int img_w = image.size(-1);
@@ -258,13 +321,17 @@ torch::Tensor fft_cross_correlation_impl(
     int stack_depth = normalize ? 4 : 2;
     int arena_stride = img_h * img_w; 
     auto real_arena = torch::zeros({batch_size * stack_depth, img_h, img_w}, image.options());
-    auto cpx_arena  = torch::zeros({batch_size * stack_depth, img_h, width_complex}, 
-                                     image.options().dtype(torch::kComplexFloat));
+
+    // For Complex tensor allocation, we need to pick correct ComplexFloat/ComplexDouble
+    auto complex_options = image.options().dtype(
+        std::is_same<scalar_t, double>::value ? torch::kComplexDouble : torch::kComplexFloat
+    );
+    auto cpx_arena  = torch::zeros({batch_size * stack_depth, img_h, width_complex}, complex_options);
 
     // 2. Statistics & Pre-processing
     torch::Tensor ker_norms;
     torch::Tensor kernel_to_pack = kernel;
-    float sqrt_N = 1.0f;
+    scalar_t sqrt_N = 1.0;
 
     if (normalize) {
         auto k_flat = kernel.reshape({batch_size, -1});
@@ -273,14 +340,14 @@ torch::Tensor fft_cross_correlation_impl(
         
         ker_norms = k_centered.norm(2, {1});
         kernel_to_pack = k_centered.view({batch_size, kernel_h, kernel_w}).contiguous();
-        sqrt_N = std::sqrt((float)(kernel_h * kernel_w));
+        sqrt_N = std::sqrt(static_cast<scalar_t>(kernel_h * kernel_w));
     } else {
         ker_norms = torch::empty({1}, image.options()); 
     }
 
     // 3. Step 1: Pack
-    int plane_size_bytes = batch_size * arena_stride * sizeof(float);
-    float* raw_arena = real_arena.data_ptr<float>();
+    int plane_size_bytes = batch_size * arena_stride * sizeof(scalar_t);
+    scalar_t* raw_arena = real_arena.data_ptr<scalar_t>();
 
     if (normalize) {
         cudaMemsetAsync(raw_arena + 2 * batch_size * arena_stride, 0, 2 * plane_size_bytes, stream);
@@ -303,8 +370,8 @@ torch::Tensor fft_cross_correlation_impl(
     int img_xblocks = (total_pixels + 255) / 256;
     launch_loop_batches([&](int batch_offset, int batches_here) {
         dim3 g(img_xblocks, 1, batches_here);
-        pack_image_kernel<<<g, 256, 0, stream>>>(
-            image.data_ptr<float>(), real_arena.data_ptr<float>(),
+        pack_image_kernel<scalar_t><<<g, 256, 0, stream>>>(
+            image.data_ptr<scalar_t>(), real_arena.data_ptr<scalar_t>(),
             img_h, img_w, img_stride, arena_stride, normalize, batch_offset, batch_size
         );
     });
@@ -313,31 +380,41 @@ torch::Tensor fft_cross_correlation_impl(
     int ker_xblocks = (total_ker_pixels + 255) / 256;
     launch_loop_batches([&](int batch_offset, int batches_here) {
         dim3 g(ker_xblocks, 1, batches_here);
-        pack_template_kernel<<<g, 256, 0, stream>>>(
-            kernel_to_pack.data_ptr<float>(), real_arena.data_ptr<float>(),
+        pack_template_kernel<scalar_t><<<g, 256, 0, stream>>>(
+            kernel_to_pack.data_ptr<scalar_t>(), real_arena.data_ptr<scalar_t>(),
             kernel_h, kernel_w, img_w, ker_stride, arena_stride, normalize, batch_offset, batch_size
         );
     });
 
     // 4. FFT
     CUFFT_CHECK(cufftSetStream(plan_r2c, stream));
-    CUFFT_CHECK(cufftExecR2C(plan_r2c, real_arena.data_ptr<float>(), reinterpret_cast<cufftComplex*>(cpx_arena.data_ptr())));
+
+    // Dispatch to correct Exec function
+    if constexpr (std::is_same<scalar_t, float>::value) {
+        CUFFT_CHECK(cufftExecR2C(plan_r2c, real_arena.data_ptr<scalar_t>(), reinterpret_cast<cufftComplex*>(cpx_arena.data_ptr())));
+    } else {
+        CUFFT_CHECK(cufftExecD2Z(plan_r2c, real_arena.data_ptr<scalar_t>(), reinterpret_cast<cufftDoubleComplex*>(cpx_arena.data_ptr())));
+    }
 
     // 5. Spectral Math
     int total_spec = img_h * width_complex;
-    float fft_scale = 1.0f / (float)total_pixels;
+    scalar_t fft_scale = static_cast<scalar_t>(1.0) / static_cast<scalar_t>(total_pixels);
     int spec_xblocks = (total_spec + 255) / 256;
     launch_loop_batches([&](int batch_offset, int batches_here) {
         dim3 g(spec_xblocks, 1, batches_here);
-        spectral_math_kernel<<<g, 256, 0, stream>>>(
-            reinterpret_cast<cuComplex*>(cpx_arena.data_ptr()), 
+        spectral_math_kernel<scalar_t><<<g, 256, 0, stream>>>(
+            reinterpret_cast<ComplexT*>(cpx_arena.data_ptr()),
             fft_scale, total_spec, normalize, batch_offset, batch_size
         );
     });
 
     // 6. IFFT
     CUFFT_CHECK(cufftSetStream(plan_c2r, stream));
-    CUFFT_CHECK(cufftExecC2R(plan_c2r, reinterpret_cast<cufftComplex*>(cpx_arena.data_ptr()), real_arena.data_ptr<float>()));
+    if constexpr (std::is_same<scalar_t, float>::value) {
+        CUFFT_CHECK(cufftExecC2R(plan_c2r, reinterpret_cast<cufftComplex*>(cpx_arena.data_ptr()), real_arena.data_ptr<scalar_t>()));
+    } else {
+        CUFFT_CHECK(cufftExecZ2D(plan_c2r, reinterpret_cast<cufftDoubleComplex*>(cpx_arena.data_ptr()), real_arena.data_ptr<scalar_t>()));
+    }
 
     CUDA_CHECK(cudaStreamSynchronize(stream));
 
@@ -346,10 +423,10 @@ torch::Tensor fft_cross_correlation_impl(
     int finalize_xblocks = (total_pixels + 255) / 256;
     launch_loop_batches([&](int batch_offset, int batches_here) {
         dim3 g(finalize_xblocks, 1, batches_here);
-        finalize_kernel<<<g, 256, 0, stream>>>(
-            real_arena.data_ptr<float>(),
-            full_result.data_ptr<float>(),
-            ker_norms.data_ptr<float>(), 
+        finalize_kernel<scalar_t><<<g, 256, 0, stream>>>(
+            real_arena.data_ptr<scalar_t>(),
+            full_result.data_ptr<scalar_t>(),
+            ker_norms.data_ptr<scalar_t>(),
             sqrt_N,
             total_pixels, normalize, batch_offset, batch_size
         );
@@ -373,15 +450,20 @@ torch::Tensor fft_cross_correlation_cuda(
     torch::Tensor kernel, 
     bool normalize
 ) {
-    int img_h = image.size(-2);
-    int img_w = image.size(-1);
-    int batch_size = image.numel() / (img_h * img_w);
-    int stack_depth = normalize ? 4 : 2;
+    return AT_DISPATCH_FLOATING_TYPES(image.scalar_type(), "fft_cross_correlation_cuda", [&] {
+        int img_h = image.size(-2);
+        int img_w = image.size(-1);
+        int batch_size = image.numel() / (img_h * img_w);
+        int stack_depth = normalize ? 4 : 2;
 
-    cufftHandle plan_r2c = CuFFTPlanCache::instance().get_plan(img_h, img_w, batch_size * stack_depth, CUFFT_R2C);
-    cufftHandle plan_c2r = CuFFTPlanCache::instance().get_plan(img_h, img_w, batch_size * stack_depth, CUFFT_C2R);
+        cufftType r2c_type = FFTTraits<scalar_t>::R2C_TYPE;
+        cufftType c2r_type = FFTTraits<scalar_t>::C2R_TYPE;
 
-    return fft_cross_correlation_impl(image, kernel, normalize, plan_r2c, plan_c2r);
+        cufftHandle plan_r2c = CuFFTPlanCache::instance().get_plan(img_h, img_w, batch_size * stack_depth, r2c_type);
+        cufftHandle plan_c2r = CuFFTPlanCache::instance().get_plan(img_h, img_w, batch_size * stack_depth, c2r_type);
+
+        return fft_cross_correlation_impl<scalar_t>(image, kernel, normalize, plan_r2c, plan_c2r);
+    });
 }
 
 // ==================================================================================
@@ -392,10 +474,6 @@ struct ClassPlanPair {
     cufftHandle r2c;
     cufftHandle c2r;
 };
-
-// We define the logic for class-based planning here but need to expose it via an opaque pointer.
-// To match the `VeryFastNormalizedCrossCorrelation` usage in binding.cpp, we would need
-// to expose create/destroy/forward_cuda.
 
 class CudaImpl {
 public:
@@ -414,13 +492,20 @@ public:
     }
 
     torch::Tensor forward(torch::Tensor image, torch::Tensor kernel) {
-        int current_batch_size = image.numel() / (img_h_ * img_w_);
-        ClassPlanPair plans = get_or_create_plans(current_batch_size);
-        return fft_cross_correlation_impl(
-            image, kernel, normalize_, 
-            plans.r2c, plans.c2r, 
-            current_batch_size
-        );
+        return AT_DISPATCH_FLOATING_TYPES(image.scalar_type(), "CudaImpl::forward", [&] {
+            int current_batch_size = image.numel() / (img_h_ * img_w_);
+
+            cufftType r2c_type = FFTTraits<scalar_t>::R2C_TYPE;
+            cufftType c2r_type = FFTTraits<scalar_t>::C2R_TYPE;
+
+            ClassPlanPair plans = get_or_create_plans(current_batch_size, r2c_type, c2r_type);
+
+            return fft_cross_correlation_impl<scalar_t>(
+                image, kernel, normalize_,
+                plans.r2c, plans.c2r,
+                current_batch_size
+            );
+        });
     }
 
 private:
@@ -428,14 +513,19 @@ private:
     int ker_h_, ker_w_;
     bool normalize_;
     
-    std::list<std::pair<int, ClassPlanPair>> plan_cache_;
+    // Key now needs to include type info because plans differ by type.
+    // Use pair<BatchSize, TypeId> as key. TypeId can be the r2c cufftType enum value.
+    using CacheKey = std::pair<int, int>;
+    std::list<std::pair<CacheKey, ClassPlanPair>> plan_cache_;
     std::mutex cache_mutex_;
 
-    ClassPlanPair get_or_create_plans(int batch_size) {
+    ClassPlanPair get_or_create_plans(int batch_size, cufftType r2c_type, cufftType c2r_type) {
         std::lock_guard<std::mutex> lock(cache_mutex_);
         
+        CacheKey key = {batch_size, (int)r2c_type};
+
         for (auto it = plan_cache_.begin(); it != plan_cache_.end(); ++it) {
-            if (it->first == batch_size) {
+            if (it->first == key) {
                 plan_cache_.splice(plan_cache_.begin(), plan_cache_, it);
                 return it->second;
             }
@@ -450,9 +540,13 @@ private:
 
         int inembed_r2c[2]  = {img_h_, img_w_};
         int onembed_r2c[2]  = {img_h_, width_complex};
+
+        // idist/odist depend on type size, but cufftPlanMany logic for idist/odist counts ELEMENTS.
+        // For R2C: input is H*W real elements. output is H*Wc complex elements.
         int idist_r2c = img_h_ * img_w_;
         int odist_r2c = img_h_ * width_complex;
 
+        // For C2R: input is H*Wc complex elements. output is H*W real elements.
         int onembed_c2r[2]  = {img_h_, img_w_};
         int inembed_c2r[2]  = {img_h_, width_complex};
         int idist_c2r = img_h_ * width_complex;
@@ -461,16 +555,16 @@ private:
         CUFFT_CHECK(cufftPlanMany(&new_plans.r2c, 2, n, 
                                   inembed_r2c, 1, idist_r2c, 
                                   onembed_r2c, 1, odist_r2c, 
-                                  CUFFT_R2C, total_layers));
+                                  r2c_type, total_layers));
 
         CUFFT_CHECK(cufftPlanMany(&new_plans.c2r, 2, n, 
                                   inembed_c2r, 1, idist_c2r, 
                                   onembed_c2r, 1, odist_c2r, 
-                                  CUFFT_C2R, total_layers));
+                                  c2r_type, total_layers));
 
-        plan_cache_.push_front({batch_size, new_plans});
+        plan_cache_.push_front({key, new_plans});
 
-        if (plan_cache_.size() > 2) {
+        if (plan_cache_.size() > 4) { // Increase cache size slightly to accommodate float/double switching if happens
             auto& last_entry = plan_cache_.back();
             cufftDestroy(last_entry.second.r2c);
             cufftDestroy(last_entry.second.c2r);
