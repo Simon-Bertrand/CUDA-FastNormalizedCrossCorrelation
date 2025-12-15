@@ -2,15 +2,9 @@
 #include <vector>
 #include <cmath>
 #include <iostream>
+#include "fft_cc.h"
 
-// Helper: Reshape Output
-std::vector<int64_t> change_h_w_shapes(const torch::Tensor& tensor, const int64_t& H, const int64_t& W) {
-    std::vector<int64_t> out;
-    out.reserve(tensor.dim());
-    out.insert(out.end(), tensor.sizes().begin(), tensor.sizes().end() - 2);
-    out.insert(out.end(), {H,W});
-    return out;
-}
+// Note: change_h_w_shapes is now inline in fft_cc.h
 
 template <typename scalar_t>
 torch::Tensor fft_cross_correlation_cpu_impl(
