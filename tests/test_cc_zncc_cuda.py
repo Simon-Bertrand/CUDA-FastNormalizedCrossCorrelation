@@ -94,22 +94,24 @@ def generate_shapes(n=40):
     return cases
 
 TEST_PARAMS = generate_shapes()
+dtypes = [torch.float32, torch.float64]
 
 # ==============================================================================
 # 3. TESTS
 # ==============================================================================
 
-def test_identity_alignment_cuda(device):
+@pytest.mark.parametrize("dtype", dtypes)
+def test_identity_alignment_cuda(device, dtype):
     """
     Verifies that a delta kernel (1 in center) produces an output perfectly 
     aligned with the input image. Crucial for FFT padding correctness.
     """
     H, W = 32, 32
     h, w = 3, 3 
-    img = torch.randn(1, H, W, device=device)
+    img = torch.randn(1, H, W, device=device, dtype=dtype)
     
     # Delta Kernel
-    ker = torch.zeros(1, h, w, device=device)
+    ker = torch.zeros(1, h, w, device=device, dtype=dtype)
     ker[0, 1, 1] = 1.0 
     
     # Run Standard CC
@@ -125,10 +127,11 @@ def test_identity_alignment_cuda(device):
         f"Alignment Error: Expected {expected_val}, Got {actual_val}"
 
 @pytest.mark.parametrize("B, H, W, h, w", TEST_PARAMS)
-def test_standard_cc_correctness_cuda(device, B, H, W, h, w):
+@pytest.mark.parametrize("dtype", dtypes)
+def test_standard_cc_correctness_cuda(device, B, H, W, h, w, dtype):
     """Verifies Standard Cross Correlation against Naive implementation."""
-    img = torch.rand(B, H, W, device=device)*2-0.5
-    ker = torch.rand(B, h, w, device=device)*2-0.5
+    img = torch.rand(B, H, W, device=device, dtype=dtype)*2-0.5
+    ker = torch.rand(B, h, w, device=device, dtype=dtype)*2-0.5
     
     res_cuda = torch_cireg.fft_cross_correlation(img, ker, False)
     res_ref = naive_cross_correlation(img, ker)
@@ -143,13 +146,15 @@ def test_standard_cc_correctness_cuda(device, B, H, W, h, w):
     max_rel_err = rel_err.max().item()
     
     # 1% relative error tolerance for float32 FFT vs Spatial
-    assert max_rel_err < 0.01, f"StdCC Mismatch (Max RelErr: {max_rel_err:.4f})"
+    tol = 0.01 if dtype == torch.float32 else 1e-4
+    assert max_rel_err < tol, f"StdCC Mismatch (Max RelErr: {max_rel_err:.4f})"
 
 @pytest.mark.parametrize("B, H, W, h, w", TEST_PARAMS)
-def test_zncc_correctness_cuda(device, B, H, W, h, w):
+@pytest.mark.parametrize("dtype", dtypes)
+def test_zncc_correctness_cuda(device, B, H, W, h, w, dtype):
     """Verifies ZNCC against Naive implementation."""
-    img = torch.rand(B, H, W, device=device)*2-0.5
-    ker = torch.rand(B, h, w, device=device)*2-0.5
+    img = torch.rand(B, H, W, device=device, dtype=dtype)*2-0.5
+    ker = torch.rand(B, h, w, device=device, dtype=dtype)*2-0.5
     # Ensure kernel variance != 0 to avoid NaNs in ground truth
     ker.view(B, -1)[:, 0] += 1.0 
     
@@ -166,9 +171,11 @@ def test_zncc_correctness_cuda(device, B, H, W, h, w):
     
     # ZNCC involves squaring/sqrt, accumulating float32 errors.
     # MAE < 1e-4 is a strict pass for correctness.
-    assert mae < 1e-4, f"ZNCC Mismatch: MAE={mae:.6f}, MaxDiff={max_diff:.6f}"
+    tol = 1e-4 if dtype == torch.float32 else 1e-7
+    assert mae < tol, f"ZNCC Mismatch: MAE={mae:.8f}, MaxDiff={max_diff:.8f}"
 
-def test_high_dimensionality_support_cuda(device):
+@pytest.mark.parametrize("dtype", dtypes)
+def test_high_dimensionality_support_cuda(device, dtype):
     """
     Verifies support for ND tensors (e.g. 5D).
     The kernel should flatten all leading dims into a single batch.
@@ -177,8 +184,8 @@ def test_high_dimensionality_support_cuda(device):
     dims = (2, 2, 2, 32, 32)
     k_dims = (2, 2, 2, 5, 5)
     
-    img = torch.randn(*dims, device=device)
-    ker = torch.randn(*k_dims, device=device)
+    img = torch.randn(*dims, device=device, dtype=dtype)
+    ker = torch.randn(*k_dims, device=device, dtype=dtype)
     
     res = torch_cireg.fft_cross_correlation(img, ker, False)
     
@@ -199,12 +206,13 @@ def test_error_handling_cuda(device):
 # ==============================================================================
 # 4. CLASS API TEST
 # ==============================================================================
-def test_class_api_cuda(device):
+@pytest.mark.parametrize("dtype", dtypes)
+def test_class_api_cuda(device, dtype):
     H, W = 64, 64
     h, w = 15, 15
 
-    img = torch.randn(1, H, W, device=device)
-    ker = torch.randn(1, h, w, device=device)
+    img = torch.randn(1, H, W, device=device, dtype=dtype)
+    ker = torch.randn(1, h, w, device=device, dtype=dtype)
 
     # Initialize the VeryFastNormalizedCrossCorrelation class
     matcher = torch_cireg.VeryFastNormalizedCrossCorrelation(H, W, h, w, normalize=True)
@@ -215,3 +223,4 @@ def test_class_api_cuda(device):
     assert res is not None
     assert res.is_cuda
     assert res.shape == (1, H-h+1, W-w+1)
+    assert res.dtype == dtype
