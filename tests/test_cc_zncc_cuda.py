@@ -19,8 +19,12 @@ random.seed(42)
 
 @pytest.fixture(scope="module")
 def device():
+    # User requested to adapt for CUDA testing without running on actual GPU if not available.
+    # However, to test the CUDA implementation, we must call the function with CUDA tensors.
+    # If no CUDA device is present, we cannot truly "run" the test.
+    # But since the goal is to have the file ready for CUDA testing, we default to 'cuda'.
     if not CUDA_AVAILABLE:
-        pytest.skip("CUDA extension not installed")
+        pytest.skip("CUDA extension not installed or no GPU available")
     return torch.device('cuda')
 
 def naive_cross_correlation(image, kernel):
@@ -95,9 +99,8 @@ TEST_PARAMS = generate_shapes()
 # 3. TESTS
 # ==============================================================================
 
-def test_identity_alignment(device):
+def test_identity_alignment_cuda(device):
     """
-    
     Verifies that a delta kernel (1 in center) produces an output perfectly 
     aligned with the input image. Crucial for FFT padding correctness.
     """
@@ -122,7 +125,7 @@ def test_identity_alignment(device):
         f"Alignment Error: Expected {expected_val}, Got {actual_val}"
 
 @pytest.mark.parametrize("B, H, W, h, w", TEST_PARAMS)
-def test_standard_cc_correctness(device, B, H, W, h, w):
+def test_standard_cc_correctness_cuda(device, B, H, W, h, w):
     """Verifies Standard Cross Correlation against Naive implementation."""
     img = torch.rand(B, H, W, device=device)*2-0.5
     ker = torch.rand(B, h, w, device=device)*2-0.5
@@ -143,7 +146,7 @@ def test_standard_cc_correctness(device, B, H, W, h, w):
     assert max_rel_err < 0.01, f"StdCC Mismatch (Max RelErr: {max_rel_err:.4f})"
 
 @pytest.mark.parametrize("B, H, W, h, w", TEST_PARAMS)
-def test_zncc_correctness(device, B, H, W, h, w):
+def test_zncc_correctness_cuda(device, B, H, W, h, w):
     """Verifies ZNCC against Naive implementation."""
     img = torch.rand(B, H, W, device=device)*2-0.5
     ker = torch.rand(B, h, w, device=device)*2-0.5
@@ -165,7 +168,7 @@ def test_zncc_correctness(device, B, H, W, h, w):
     # MAE < 1e-4 is a strict pass for correctness.
     assert mae < 1e-4, f"ZNCC Mismatch: MAE={mae:.6f}, MaxDiff={max_diff:.6f}"
 
-def test_high_dimensionality_support(device):
+def test_high_dimensionality_support_cuda(device):
     """
     Verifies support for ND tensors (e.g. 5D).
     The kernel should flatten all leading dims into a single batch.
@@ -183,7 +186,7 @@ def test_high_dimensionality_support(device):
     assert res.shape == expected_shape, f"ND Shape Mismatch: Got {res.shape}"
     assert not torch.isnan(res).any()
 
-def test_error_handling(device):
+def test_error_handling_cuda(device):
     """Verifies that invalid input shapes raise errors."""
     # 1D Tensor (too few dims)
     img = torch.randn(10, device=device)
@@ -192,3 +195,23 @@ def test_error_handling(device):
     # Should catch either in Python wrapper or C++ TORCH_CHECK
     with pytest.raises(RuntimeError):
         torch_cireg.fft_cross_correlation(img, ker, False)
+
+# ==============================================================================
+# 4. CLASS API TEST
+# ==============================================================================
+def test_class_api_cuda(device):
+    H, W = 64, 64
+    h, w = 15, 15
+
+    img = torch.randn(1, H, W, device=device)
+    ker = torch.randn(1, h, w, device=device)
+
+    # Initialize the VeryFastNormalizedCrossCorrelation class
+    matcher = torch_cireg.VeryFastNormalizedCrossCorrelation(H, W, h, w, normalize=True)
+
+    # Forward pass
+    res = matcher.forward(img, ker)
+
+    assert res is not None
+    assert res.is_cuda
+    assert res.shape == (1, H-h+1, W-w+1)
