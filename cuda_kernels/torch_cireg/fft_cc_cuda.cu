@@ -56,6 +56,8 @@ template <> struct FFTTraits<float> {
     __device__ static float imag(ComplexType c) { return cuCimagf(c); }
     __device__ static float rsqrt(float x) { return rsqrtf(x); }
     __device__ static float fmax(float x, float y) { return fmaxf(x, y); }
+    __device__ static float fmin(float x, float y) { return fminf(x, y); }
+    __device__ static bool isnan(float x) { return isnan(x); }
 };
 
 template <> struct FFTTraits<double> {
@@ -69,8 +71,10 @@ template <> struct FFTTraits<double> {
     }
     __device__ static double real(ComplexType c) { return cuCreal(c); }
     __device__ static double imag(ComplexType c) { return cuCimag(c); }
-    __device__ static double rsqrt(double x) { return ::rsqrt(x); } // standard rsqrt might be float, use generic or 1/sqrt
+    __device__ static double rsqrt(double x) { return 1.0 / sqrt(x); }
     __device__ static double fmax(double x, double y) { return fmax(x, y); }
+    __device__ static double fmin(double x, double y) { return fmin(x, y); }
+    __device__ static bool isnan(double x) { return isnan(x); }
 };
 
 // ==================================================================================
@@ -239,7 +243,10 @@ __global__ void finalize_kernel(
     scalar_t* __restrict__ out_ptr,
     const scalar_t* __restrict__ ker_norms,
     scalar_t sqrt_N,
-    int plane_stride, 
+    int arena_stride,   // img_h * img_w
+    int img_w,          // to calc y
+    int out_w,          // to calc x/y from idx
+    int total_out_pixels, // crop_h * crop_w
     bool use_zncc,
     int batch_offset, int batch_global
 ) {
@@ -249,15 +256,20 @@ __global__ void finalize_kernel(
     int b = local_b + batch_offset;
 
     if (b >= batch_global) return;
-    if (idx >= plane_stride) return;
+    if (idx >= total_out_pixels) return;
 
-    int out_base = b * plane_stride;
+    // Coordinate mapping for Fused Crop
+    int out_y = idx / out_w;
+    int out_x = idx % out_w;
+    int arena_idx = out_y * img_w + out_x;
+
+    int out_base = b * total_out_pixels;
 
     if (use_zncc) {
-        int base = b * (4 * plane_stride); 
-        scalar_t num    = arena_ptr[base + 0 * plane_stride + idx];
-        scalar_t sum_i  = arena_ptr[base + 1 * plane_stride + idx];
-        scalar_t sum_i2 = arena_ptr[base + 2 * plane_stride + idx];
+        int base = b * (4 * arena_stride); 
+        scalar_t num    = arena_ptr[base + 0 * arena_stride + arena_idx];
+        scalar_t sum_i  = arena_ptr[base + 1 * arena_stride + arena_idx];
+        scalar_t sum_i2 = arena_ptr[base + 2 * arena_stride + arena_idx];
 
         scalar_t N = sqrt_N * sqrt_N;
         scalar_t var_term = N * sum_i2 - (sum_i * sum_i);
@@ -265,14 +277,24 @@ __global__ void finalize_kernel(
         
         scalar_t t_norm = ker_norms[b];
 
-        if (var_term < static_cast<scalar_t>(1e-5) || t_norm < static_cast<scalar_t>(1e-6)) {
+        // Use smaller epsilon for double precision to avoid suppressing valid correlations
+        scalar_t epsilon = std::is_same<scalar_t, double>::value ? static_cast<scalar_t>(1e-6) : static_cast<scalar_t>(1e-5);
+
+        if (var_term < epsilon || 
+            t_norm < epsilon || 
+            Traits::isnan(var_term) || 
+            Traits::isnan(t_norm) || 
+            Traits::isnan(num)) {
             out_ptr[out_base + idx] = static_cast<scalar_t>(0.0);
         } else {
-            out_ptr[out_base + idx] = (num * sqrt_N) * Traits::rsqrt(var_term) * (static_cast<scalar_t>(1.0) / t_norm);
+            scalar_t res = (num * sqrt_N) * Traits::rsqrt(var_term) * (static_cast<scalar_t>(1.0) / t_norm);
+            res = Traits::fmin(res, static_cast<scalar_t>(1.0));
+            res = Traits::fmax(res, static_cast<scalar_t>(-1.0));
+            out_ptr[out_base + idx] = res;
         }
     } else {
-        int base = b * (2 * plane_stride);
-        out_ptr[out_base + idx] = arena_ptr[base + idx];
+        int base = b * (2 * arena_stride);
+        out_ptr[out_base + idx] = arena_ptr[base + arena_idx];
     }
 }
 
@@ -319,7 +341,7 @@ torch::Tensor fft_cross_correlation_impl(
     auto complex_options = image.options().dtype(
         std::is_same<scalar_t, double>::value ? torch::kComplexDouble : torch::kComplexFloat
     );
-    auto cpx_arena  = torch::zeros({batch_size * stack_depth, img_h, width_complex}, complex_options);
+    auto cpx_arena  = torch::empty({batch_size * stack_depth, img_h, width_complex}, complex_options);
 
     // 2. Statistics & Pre-processing
     torch::Tensor ker_norms;
@@ -342,11 +364,7 @@ torch::Tensor fft_cross_correlation_impl(
     int plane_size_bytes = batch_size * arena_stride * sizeof(scalar_t);
     scalar_t* raw_arena = real_arena.data_ptr<scalar_t>();
 
-    if (normalize) {
-        cudaMemsetAsync(raw_arena + 2 * batch_size * arena_stride, 0, 2 * plane_size_bytes, stream);
-    } else {
-        cudaMemsetAsync(raw_arena + 1 * batch_size * arena_stride, 0, plane_size_bytes, stream);
-    }
+    // Note: real_arena is allocated with torch::zeros, so we don't need cudaMemsetAsync.
 
     const int CUDA_MAX_GRID_Z = 65535;
     auto launch_loop_batches = [&](auto kernel_launcher) {
@@ -411,28 +429,28 @@ torch::Tensor fft_cross_correlation_impl(
 
     CUDA_CHECK(cudaStreamSynchronize(stream));
 
-    // 7. Finalize
-    auto full_result = torch::empty({batch_size, img_h, img_w}, image.options());
-    int finalize_xblocks = (total_pixels + 255) / 256;
+    // 7. Finalize & Crop (Fused)
+    const auto crop_h = img_h - kernel_h + 1;
+    const auto crop_w = img_w - kernel_w + 1;
+    int total_out_pixels = crop_h * crop_w;
+    auto final_result = torch::empty({batch_size, crop_h, crop_w}, image.options());
+    
+    int finalize_xblocks = (total_out_pixels + 255) / 256;
     launch_loop_batches([&](int batch_offset, int batches_here) {
         dim3 g(finalize_xblocks, 1, batches_here);
         finalize_kernel<scalar_t><<<g, 256, 0, stream>>>(
             real_arena.data_ptr<scalar_t>(),
-            full_result.data_ptr<scalar_t>(),
+            final_result.data_ptr<scalar_t>(),
             ker_norms.data_ptr<scalar_t>(),
             sqrt_N,
-            total_pixels, normalize, batch_offset, batch_size
+            total_pixels, img_w, crop_w, total_out_pixels,
+            normalize, batch_offset, batch_size
         );
     });
 
     CUDA_CHECK(cudaStreamSynchronize(stream));
     
-    // 8. Crop
-    const auto crop_h = img_h - kernel_h + 1;
-    const auto crop_w = img_w - kernel_w + 1;
-
-    return full_result.slice(1, 0, crop_h).slice(2, 0,crop_w)
-                .reshape(change_h_w_shapes(image, crop_h, crop_w));
+    return final_result.reshape(change_h_w_shapes(image, crop_h, crop_w));
 }
 
 // ==================================================================================
