@@ -47,11 +47,28 @@ torch::Tensor fft_cross_correlation_cpu_impl(
     using namespace torch::indexing;
 
     // Fill Plane 0: Image
-    // Use select().copy_() which is generally cleaner/faster than generic index_put_
-    arena.select(1, 0).copy_(img_flat);
+    // Optimized: In ZNCC, subtract per-image mean to improve numerical stability.
 
-    // Fill Plane 1: Image^2 (ZNCC) or Kernel (CC)
-    // Fill Plane 2: Kernel (ZNCC)
+    if (normalize) {
+        // Calculate Mean per image: [B, 1, 1]
+        auto img_means = img_flat.mean({1, 2}, true);
+
+        // Plane 0: Image (Centered)
+        // Copy and subtract mean in-place
+        auto plane0 = arena.select(1, 0);
+        plane0.copy_(img_flat);
+        plane0.sub_(img_means);
+
+        // Plane 1: Image^2 (ZNCC)
+        // Calculate square directly into the arena from the centered image
+        auto plane1 = arena.select(1, 1);
+        torch::mul_out(plane1, plane0, plane0);
+    } else {
+        // Just copy image
+        arena.select(1, 0).copy_(img_flat);
+    }
+
+    // Fill Plane 2: Kernel (ZNCC) or Plane 1 (CC)
     // Fill Plane 3: Ones (ZNCC)
 
     torch::Tensor ker_norms;
@@ -66,11 +83,6 @@ torch::Tensor fft_cross_correlation_cpu_impl(
         ker_norms = k_centered.norm(2, {1, 2});
         ker_to_pack = k_centered;
         sqrt_N = std::sqrt(static_cast<scalar_t>(h * w));
-
-        // Plane 1: Image^2
-        // Calculate square directly into the arena to avoid temporary allocation
-        auto plane1 = arena.select(1, 1);
-        torch::mul_out(plane1, img_flat, img_flat);
 
         // Plane 2: Kernel (Padded)
         arena.select(1, 2).index_put_({Slice(), Slice(0, h), Slice(0, w)}, ker_to_pack);
@@ -92,64 +104,45 @@ torch::Tensor fft_cross_correlation_cpu_impl(
     int64_t W_complex = arena_spec.size(-1);
     auto spec_view = arena_spec.reshape({batch_size, depth, H, W_complex});
 
-    // 4. Spectral Math
-    // Compute products in-place where possible, or reuse spec buffer for IFFT inputs.
-    // We need to form the inputs for IFFT.
-    // ZNCC Outputs: Num, Sum_I, Sum_I2
-    // CC Output: Num
-
-    // We can reuse the same arena_spec buffer for IFFT inputs.
-    // Let's overwrite:
-    // Plane 0 -> Result/Num
-    // Plane 1 -> Sum_I (ZNCC)
-    // Plane 2 -> Sum_I2 (ZNCC)
-
-    // Accessors
-    auto I_spec = spec_view.select(1, 0);
+    // 4. Spectral Math (Optimized In-Place)
+    // We reuse the same arena_spec buffer for IFFT inputs.
+    // ZNCC Target Layout for IFFT: Plane 0 -> Num, Plane 1 -> Sum_I, Plane 2 -> Sum_I2.
 
     if (normalize) {
-        auto I2_spec   = spec_view.select(1, 1);
-        auto K_spec    = spec_view.select(1, 2);
-        auto Ones_spec = spec_view.select(1, 3);
+        // Initial Layout: 0=I, 1=I2, 2=K, 3=Ones
+        // Accessors via indices to allow in-place modification
 
-        // Be careful with aliasing if we write back to I_spec.
-        // We need:
-        // Out0 = I * conj(K)
-        // Out1 = I * conj(Ones)
-        // Out2 = I2 * conj(Ones)
+        // 1. Compute Sum_I2 (needs I2, Ones). Store in Plane 1.
+        // P1 = P1 * conj(P3). Replaces I2.
+        spec_view.select(1, 1).mul_(spec_view.select(1, 3).conj());
 
-        // We can compute into temporary or carefully order.
-        // If we write to Out0 (I_spec), we lose I_spec for Out1.
-        // So we need a temporary for I_spec or compute Out1 first if it doesn't overlap?
-        // Actually, we can just allocate a new tensor for the spectral product results?
-        // But we want to minimize allocation.
-        // Better to reuse planes 0, 1, 2.
+        // 2. Compute Sum_I (needs I, Ones). Store in Plane 3.
+        // P3 = P0 * conj(P3). Replaces Ones.
+        // Note: P3 was used in step 1, but we didn't modify it there (only P1).
+        // Now we modify P3.
+        // We need conj(Ones). P3 is Ones.
+        // Fixed: Use copy_(conj()) since conj_() is not available
+        {
+            auto p3 = spec_view.select(1, 3);
+            p3.copy_(p3.conj()); // In-place conjugate physically
+            p3.mul_(spec_view.select(1, 0)); // P3 = conj(Ones) * I
+        }
 
-        // Copy I_spec if needed.
-        auto I_spec_clone = I_spec.clone();
+        // 3. Compute Num (needs I, K). Store in Plane 0.
+        // P0 = P0 * conj(P2). Replaces I.
+        spec_view.select(1, 0).mul_(spec_view.select(1, 2).conj());
 
-        // We must be careful with the order of operations to avoid overwriting inputs
-        // before they are used, since we are writing back to the same arena planes.
-        // Planes: 0=I, 1=I2, 2=K, 3=Ones
-        // Outputs needed:
-        // Out0 (Num)    = I * conj(K)    -> Write to Plane 0
-        // Out1 (Sum_I)  = I * conj(Ones) -> Write to Plane 1
-        // Out2 (Sum_I2) = I2 * conj(Ones)-> Write to Plane 2
+        // Current Layout: 0=Num, 1=Sum_I2, 2=K, 3=Sum_I
+        // Target Layout:  0=Num, 1=Sum_I,  2=Sum_I2
 
-        // 1. Compute Out0 first. Needs K (Plane 2). Writes to Plane 0 (Overwrites I).
-        //    We use I_spec_clone, so overwriting I is fine.
-        spec_view.select(1, 0).copy_(I_spec_clone * K_spec.conj());
+        // 4. Shuffle
+        // Move Sum_I2 (from P1) to P2 (overwrite K)
+        spec_view.select(1, 2).copy_(spec_view.select(1, 1));
 
-        // 2. Compute Out2. Needs I2 (Plane 1). Writes to Plane 2 (Overwrites K).
-        //    K is no longer needed (used in step 1).
-        spec_view.select(1, 2).copy_(I2_spec * Ones_spec.conj());
+        // Move Sum_I (from P3) to P1 (overwrite old Sum_I2)
+        spec_view.select(1, 1).copy_(spec_view.select(1, 3));
 
-        // 3. Compute Out1. Needs Ones (Plane 3). Writes to Plane 1 (Overwrites I2).
-        //    I2 is no longer needed (used in step 2).
-        spec_view.select(1, 1).copy_(I_spec_clone * Ones_spec.conj());
-
-        // We don't need Plane 3 anymore.
-
+        // Result: 0=Num, 1=Sum_I, 2=Sum_I2. Correct.
     } else {
         auto K_spec = spec_view.select(1, 1);
         // Out0 = I * conj(K) -> Write to Plane 0
@@ -157,19 +150,8 @@ torch::Tensor fft_cross_correlation_cpu_impl(
     }
 
     // 5. Batched IFFT
-    // We only need to transform the relevant planes.
-    // ZNCC: 3 planes (0, 1, 2).
-    // CC: 1 plane (0).
-
     int result_depth = normalize ? 3 : 1;
-
-    // Slice the relevant part of the flattened spec
-    // Note: The reshaping [B*D, ...] interleaves the batch and depth.
-    // spec_view is [B, D, H, Wc].
-    // We want to IFFT [B, result_depth, H, Wc].
-
     auto result_spec = spec_view.slice(1, 0, result_depth).reshape({batch_size * result_depth, H, W_complex});
-
     auto result_spatial_flat = torch::fft::irfft2(result_spec, {H, W});
     auto result_spatial = result_spatial_flat.reshape({batch_size, result_depth, H, W});
 
@@ -188,7 +170,10 @@ torch::Tensor fft_cross_correlation_cpu_impl(
         var_term = torch::relu(var_term);
 
         auto inv_std = torch::rsqrt(var_term);
-        auto mask = (var_term < static_cast<scalar_t>(1e-5)) | (ker_norms.view({batch_size, 1, 1}) < static_cast<scalar_t>(1e-6));
+
+        scalar_t epsilon = std::is_same<scalar_t, double>::value ? static_cast<scalar_t>(1e-6) : static_cast<scalar_t>(1e-5);
+
+        auto mask = (var_term < epsilon) | (ker_norms.view({batch_size, 1, 1}) < epsilon);
 
         final_out = (num * sqrt_N) * inv_std * (static_cast<scalar_t>(1.0) / ker_norms.view({batch_size, 1, 1}));
         final_out.index_put_({mask}, static_cast<scalar_t>(0.0));

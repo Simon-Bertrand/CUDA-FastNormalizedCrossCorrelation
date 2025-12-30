@@ -130,6 +130,7 @@ template <typename scalar_t>
 __global__ void pack_image_kernel(
     const scalar_t* __restrict__ img_ptr,
     scalar_t* __restrict__ arena_ptr,
+    const scalar_t* __restrict__ img_means, // [B] or nullptr
     int img_h, int img_w, 
     int img_stride, int arena_stride,
     bool use_zncc,
@@ -147,6 +148,11 @@ __global__ void pack_image_kernel(
     int batch_base = b * (stack_depth * arena_stride) + idx;
     
     scalar_t px_val = img_ptr[b * img_stride + idx];
+
+    if (use_zncc && img_means != nullptr) {
+        // Subtract mean
+        px_val -= img_means[b];
+    }
     
     arena_ptr[batch_base] = px_val; 
     if (use_zncc) {
@@ -227,6 +233,9 @@ __global__ void spectral_math_kernel(
         ComplexT T  = data_ptr[base + 2 * plane_stride + idx];
         ComplexT O  = data_ptr[base + 3 * plane_stride + idx];
         
+        // Output P0 (Num) = I * conj(T)
+        // Output P1 (Sum_I) = I * conj(O)
+        // Output P2 (Sum_I2) = I2 * conj(O)
         data_ptr[base + 0 * plane_stride + idx] = cmul_conj_scale(I, T); 
         data_ptr[base + 1 * plane_stride + idx] = cmul_conj_scale(I, O);
         data_ptr[base + 2 * plane_stride + idx] = cmul_conj_scale(I2, O);
@@ -348,6 +357,9 @@ torch::Tensor fft_cross_correlation_impl(
     torch::Tensor kernel_to_pack = kernel;
     scalar_t sqrt_N = 1.0;
 
+    // Per-image mean for stability
+    torch::Tensor img_means;
+
     if (normalize) {
         auto k_flat = kernel.reshape({batch_size, -1});
         auto k_mean = k_flat.mean(1, true);
@@ -356,6 +368,10 @@ torch::Tensor fft_cross_correlation_impl(
         ker_norms = k_centered.norm(2, {1});
         kernel_to_pack = k_centered.view({batch_size, kernel_h, kernel_w}).contiguous();
         sqrt_N = std::sqrt(static_cast<scalar_t>(kernel_h * kernel_w));
+
+        // Compute image means [B]
+        auto img_flat = image.reshape({batch_size, -1});
+        img_means = img_flat.mean(1);
     } else {
         ker_norms = torch::empty({1}, image.options()); 
     }
@@ -383,6 +399,7 @@ torch::Tensor fft_cross_correlation_impl(
         dim3 g(img_xblocks, 1, batches_here);
         pack_image_kernel<scalar_t><<<g, 256, 0, stream>>>(
             image.data_ptr<scalar_t>(), real_arena.data_ptr<scalar_t>(),
+            normalize ? img_means.data_ptr<scalar_t>() : nullptr,
             img_h, img_w, img_stride, arena_stride, normalize, batch_offset, batch_size
         );
     });
