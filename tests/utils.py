@@ -9,9 +9,9 @@ def naive_cc(image, kernel, normalize=False):
     This works on CPU (numpy).
     """
     if isinstance(image, torch.Tensor):
-        image = image.cpu().numpy()
+        image = image.detach().cpu().numpy()
     if isinstance(kernel, torch.Tensor):
-        kernel = kernel.cpu().numpy()
+        kernel = kernel.detach().cpu().numpy()
 
     # Handle batch dimension by iterating
     # image: [B, H, W]

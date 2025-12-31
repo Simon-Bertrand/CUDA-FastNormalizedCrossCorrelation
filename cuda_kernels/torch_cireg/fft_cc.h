@@ -11,21 +11,13 @@ inline std::vector<int64_t> change_h_w_shapes(const torch::Tensor& tensor, const
     return out;
 }
 
-torch::Tensor fft_cross_correlation_cpu(
-    torch::Tensor image,
-    torch::Tensor kernel,
-    bool normalize
-);
+// Forward Pass: Returns Output
+torch::Tensor fft_cc_forward_cpu(torch::Tensor image, torch::Tensor kernel);
+
+// Backward Pass: Returns {grad_image, grad_kernel}
+std::vector<torch::Tensor> fft_cc_backward_cpu(torch::Tensor grad_output, torch::Tensor image, torch::Tensor kernel);
 
 #ifdef WITH_CUDA
-torch::Tensor fft_cross_correlation_cuda(
-    torch::Tensor image,
-    torch::Tensor kernel,
-    bool normalize
-);
-
-// Class API helpers
-void* create_cuda_impl(int img_h, int img_w, int ker_h, int ker_w, bool normalize);
-void destroy_cuda_impl(void* impl);
-torch::Tensor forward_cuda_impl(void* impl, torch::Tensor image, torch::Tensor kernel);
+torch::Tensor fft_cc_forward_cuda(torch::Tensor image, torch::Tensor kernel);
+std::vector<torch::Tensor> fft_cc_backward_cuda(torch::Tensor grad_output, torch::Tensor image, torch::Tensor kernel);
 #endif
