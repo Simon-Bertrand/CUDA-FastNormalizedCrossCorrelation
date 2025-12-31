@@ -51,11 +51,11 @@ This is the more complex operator.
 
 **Step 1: Template Standardization**
 The template $T$ is globally standardized.
-Let $\mu_T$ be the mean of $T$ and $\sigma_T$ be the standard deviation (uncorrected).
-$$ \mu_T = \frac{1}{N} \sum_v T(v) $$
-$$ \sigma_T = \sqrt{ \frac{1}{N} \sum_v (T(v) - \mu_T)^2 } $$
+Let $\mu_{T}$ be the mean of $T$ and $\sigma_{T}$ be the standard deviation (uncorrected).
+$$ \mu_{T} = \frac{1}{N} \sum_v T(v) $$
+$$ \sigma_{T} = \sqrt{ \frac{1}{N} \sum_v (T(v) - \mu_{T})^2 } $$
 The standardized template is:
-$$ \hat{T}(v) = \frac{T(v) - \mu_T}{\sigma_T} $$
+$$ \hat{T}(v) = \frac{T(v) - \mu_{T}}{\sigma_{T}} $$
 Note that $\sum_v \hat{T}(v) = 0$ and $\sum_v \hat{T}(v)^2 = N$.
 
 **Step 2: Local Image Standardization**
@@ -63,17 +63,17 @@ For each window $u$, we calculate the local mean $\mu_{I_u}$ and local standard 
 $$ \mu_{I_u} = \frac{1}{N} \sum_v I(u+v) $$
 $$ \sigma_{I_u} = \sqrt{ \frac{1}{N} \sum_v (I(u+v) - \mu_{I_u})^2 } $$
 The locally standardized image patch is:
-$$ \hat{I}_u(v) = \frac{I(u+v) - \mu_{I_u}}{\sigma_{I_u}} $$
+$$ \hat{I}_{u}(v) = \frac{I(u+v) - \mu_{I_u}}{\sigma_{I_u}} $$
 
 **Step 3: ZNCC Calculation**
 The ZNCC score at $u$ is the dot product of the standardized vectors divided by $N$.
 The implementation effectively computes:
-$$ Z(u) = \frac{1}{\sigma_T \sigma_{I_u}} \sum_v (I(u+v) - \mu_{I_u})(T(v) - \mu_T) $$
-Using the fact that $\sum (T(v)-\mu_T) = 0$, the term involving $\mu_{I_u}$ vanishes:
-$$ \sum_v (I(u+v) - \mu_{I_u})(T(v) - \mu_T) = \sum_v I(u+v)(T(v) - \mu_T) - \mu_{I_u}\underbrace{\sum_v (T(v) - \mu_T)}_{0} $$
+$$ Z(u) = \frac{1}{\sigma_{T} \sigma_{I_u}} \sum_v (I(u+v) - \mu_{I_u})(T(v) - \mu_{T}) $$
+Using the fact that $\sum (T(v)-\mu_{T}) = 0$, the term involving $\mu_{I_u}$ vanishes:
+$$ \sum_v (I(u+v) - \mu_{I_u})(T(v) - \mu_{T}) = \sum_v I(u+v)(T(v) - \mu_{T}) - \mu_{I_u} \cdot 0 $$
 So:
 $$ Z(u) = \frac{1}{\sigma_{I_u}} \sum_v I(u+v) \hat{T}(v) $$
-(Note: The factor $1/\sigma_T$ is absorbed into $\hat{T}$).
+(Note: The factor $1/\sigma_{T}$ is absorbed into $\hat{T}$).
 
 Let $C(u) = \sum_v I(u+v) \hat{T}(v)$. This is the standard cross-correlation of $I$ with the pre-standardized template $\hat{T}$.
 Then:
@@ -81,7 +81,7 @@ $$ Z(u) = \frac{C(u)}{\sigma_{I_u}} $$
 
 ### 3.2 Backward Pass Derivation
 
-We need $\nabla_I L$ and $\nabla_T L$.
+We need $\nabla_{I} L$ and $\nabla_{T} L$.
 Let $\delta(u) = \frac{\partial L}{\partial Z(u)}$.
 
 #### Gradient w.r.t Image ($I$)
@@ -101,16 +101,16 @@ $$ \frac{\partial \sigma_{I_u}^2}{\partial I(k)} = \frac{1}{N} \cdot 2 I(k) - 2 
 Since $\mu_{I_u} = \frac{1}{N} \sum I$, $\frac{\partial \mu_{I_u}}{\partial I(k)} = \frac{1}{N}$.
 $$ \frac{\partial \sigma_{I_u}^2}{\partial I(k)} = \frac{2}{N} (I(k) - \mu_{I_u}) $$
 Substituting back:
-$$ \frac{\partial \sigma_{I_u}^{-1}}{\partial I(k)} = -\frac{1}{2\sigma_{I_u}^3} \frac{2}{N} (I(k) - \mu_{I_u}) = -\frac{1}{N \sigma_{I_u}^2} \underbrace{\frac{I(k) - \mu_{I_u}}{\sigma_{I_u}}}_{\hat{I}_u(k-u)} = -\frac{1}{N \sigma_{I_u}^2} \hat{I}_u(k-u) $$
+$$ \frac{\partial \sigma_{I_u}^{-1}}{\partial I(k)} = -\frac{1}{2\sigma_{I_u}^3} \frac{2}{N} (I(k) - \mu_{I_u}) = -\frac{1}{N \sigma_{I_u}^2} \hat{I}_{u}(k-u) $$
 
 **Combining Terms:**
-$$ \frac{\partial Z(u)}{\partial I(k)} = \frac{1}{\sigma_{I_u}} \hat{T}(k-u) + C(u) \left( -\frac{1}{N \sigma_{I_u}^2} \hat{I}_u(k-u) \right) $$
+$$ \frac{\partial Z(u)}{\partial I(k)} = \frac{1}{\sigma_{I_u}} \hat{T}(k-u) + C(u) \left( -\frac{1}{N \sigma_{I_u}^2} \hat{I}_{u}(k-u) \right) $$
 Since $Z(u) = C(u) / \sigma_{I_u}$:
-$$ \frac{\partial Z(u)}{\partial I(k)} = \frac{1}{\sigma_{I_u}} \left( \hat{T}(k-u) - \frac{Z(u)}{N} \hat{I}_u(k-u) \right) $$
+$$ \frac{\partial Z(u)}{\partial I(k)} = \frac{1}{\sigma_{I_u}} \left( \hat{T}(k-u) - \frac{Z(u)}{N} \hat{I}_{u}(k-u) \right) $$
 
 **Total Gradient:**
 $$ \frac{\partial L}{\partial I(k)} = \sum_u \delta(u) \frac{\partial Z(u)}{\partial I(k)} $$
-$$ \frac{\partial L}{\partial I(k)} = \sum_u \frac{\delta(u)}{\sigma_{I_u}} \left( \hat{T}(k-u) - \frac{Z(u)}{N} \hat{I}_u(k-u) \right) $$
+$$ \frac{\partial L}{\partial I(k)} = \sum_u \frac{\delta(u)}{\sigma_{I_u}} \left( \hat{T}(k-u) - \frac{Z(u)}{N} \hat{I}_{u}(k-u) \right) $$
 
 This can be interpreted as:
 1. Backpropagate $\frac{\delta(u)}{\sigma_{I_u}}$ through the correlation with $\hat{T}$.
@@ -119,23 +119,23 @@ This can be interpreted as:
 #### Gradient w.r.t Template ($T$)
 
 $Z(u)$ depends on $T$ via $\hat{T}(v)$.
-$$ Z(u) = \sum_v \hat{I}_u(v) \hat{T}(v) $$
+$$ Z(u) = \sum_v \hat{I}_{u}(v) \hat{T}(v) $$
 
 Let $\nabla_{\hat{T}} L$ be the gradient w.r.t the standardized template.
-$$ \frac{\partial L}{\partial \hat{T}(v)} = \sum_u \delta(u) \frac{\partial Z(u)}{\partial \hat{T}(v)} = \sum_u \delta(u) \hat{I}_u(v) $$
+$$ \frac{\partial L}{\partial \hat{T}(v)} = \sum_u \delta(u) \frac{\partial Z(u)}{\partial \hat{T}(v)} = \sum_u \delta(u) \hat{I}_{u}(v) $$
 This is the correlation of the input image $I$ (locally standardized) with the upstream gradient $\delta$.
 
 Now we backpropagate from $\hat{T}$ to $T$.
-$$ \hat{T}(v) = \frac{T(v) - \mu_T}{\sigma_T} $$
+$$ \hat{T}(v) = \frac{T(v) - \mu_{T}}{\sigma_{T}} $$
 The Jacobian of Standardization is standard for Batch/Layer Norm:
-$$ \frac{\partial L}{\partial T(j)} = \frac{1}{\sigma_T} \left( \frac{\partial L}{\partial \hat{T}(j)} - \frac{1}{N} \sum_v \frac{\partial L}{\partial \hat{T}(v)} - \frac{\hat{T}(j)}{N} \sum_v \frac{\partial L}{\partial \hat{T}(v)} \hat{T}(v) \right) $$
+$$ \frac{\partial L}{\partial T(j)} = \frac{1}{\sigma_{T}} \left( \frac{\partial L}{\partial \hat{T}(j)} - \frac{1}{N} \sum_v \frac{\partial L}{\partial \hat{T}(v)} - \frac{\hat{T}(j)}{N} \sum_v \frac{\partial L}{\partial \hat{T}(v)} \hat{T}(v) \right) $$
 
 Let $G_{\hat{T}} = \nabla_{\hat{T}} L$.
-$$ \nabla_T L = \frac{1}{\sigma_T} \left( G_{\hat{T}} - \mathrm{mean}(G_{\hat{T}}) - \hat{T} \cdot \langle G_{\hat{T}}, \hat{T} \rangle_{\mathrm{avg}} \right) $$
+$$ \nabla_{T} L = \frac{1}{\sigma_{T}} \left( G_{\hat{T}} - \mathrm{mean}(G_{\hat{T}}) - \hat{T} \cdot \langle G_{\hat{T}}, \hat{T} \rangle_{\mathrm{avg}} \right) $$
 
 ### Summary of ZNCC Backward Steps
 
-1. Compute $G_{\hat{T}} = \sum_u \delta(u) \hat{I}_u$.
-2. Compute $\nabla_T L$ by backpropagating $G_{\hat{T}}$ through template standardization.
+1. Compute $G_{\hat{T}} = \sum_u \delta(u) \hat{I}_{u}$.
+2. Compute $\nabla_{T} L$ by backpropagating $G_{\hat{T}}$ through template standardization.
 3. Compute update map $M(u) = \frac{\delta(u)}{\sigma_{I_u}}$.
-4. Compute $\nabla_I L$ by convolving $M$ with $\hat{T}$ and subtracting the "local norm" correction term.
+4. Compute $\nabla_{I} L$ by convolving $M$ with $\hat{T}$ and subtracting the "local norm" correction term.
