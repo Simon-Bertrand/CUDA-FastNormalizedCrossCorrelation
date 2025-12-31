@@ -109,7 +109,7 @@ private:
 // KERNELS: FORWARD
 // ==================================================================================
 
-// Packs Image (Plane 0) and Kernel (Plane 1) into Arena
+// Packs Image (Plane 0) and Kernel (Plane 1) into Arena, Handling Padding
 template <typename scalar_t>
 __global__ void pack_fwd_kernel(
     const scalar_t* __restrict__ img_ptr,
@@ -123,27 +123,26 @@ __global__ void pack_fwd_kernel(
     int b = blockIdx.z;
     if (b >= batch_size) return;
 
-    // We process by pixels.
-    // Image pixels: H*W
-    // Kernel pixels: h*w
-    // We can map idx to either image or kernel based on range,
-    // or just run two separate launches. Merged launch is complex for different sizes.
-    // Let's assume idx covers H*W (max size).
+    // We process by pixels of H*W (max)
+    if (idx >= H*W) return;
     
-    // Pack Image
-    if (idx < H*W) {
-        // Plane 0
-        arena_ptr[b * 2 * stride_arena + idx] = img_ptr[b * stride_img + idx];
-    }
+    int r = idx / W;
+    int c = idx % W;
     
-    // Pack Kernel
-    if (idx < h*w) {
-        int r = idx / w;
-        int c = idx % w;
-        int arena_idx = r * W + c; // Pad to H, W
-        // Plane 1
-        arena_ptr[b * 2 * stride_arena + stride_arena + arena_idx] = ker_ptr[b * stride_ker + idx];
+    int base_arena = b * 2 * stride_arena;
+
+    // Plane 0: Image (Full Copy, HxW -> HxW)
+    // Assuming image matches HxW
+    arena_ptr[base_arena + idx] = img_ptr[b * stride_img + idx];
+
+    // Plane 1: Kernel (Copy hxw, Zero Pad rest)
+    scalar_t val = 0;
+    if (r < h && c < w) {
+        // Map to flat kernel index
+        int k_idx = r * w + c;
+        val = ker_ptr[b * stride_ker + k_idx];
     }
+    arena_ptr[base_arena + stride_arena + idx] = val;
 }
 
 // Complex Math: O = I * conj(K)
@@ -195,54 +194,61 @@ __global__ void finalize_fwd_kernel(
 }
 
 // ==================================================================================
-// KERNELS: BACKWARD
+// KERNELS: BACKWARD (SPLIT MEMORY)
 // ==================================================================================
 
-// Packs I (P0), K (P1), G (P2)
+// Packs I (P0), K (P1) into IK buffer. G (P0) into G buffer.
+// Zero pads as needed.
 template <typename scalar_t>
-__global__ void pack_bwd_kernel(
+__global__ void pack_bwd_split_kernel(
     const scalar_t* __restrict__ img_ptr,
     const scalar_t* __restrict__ ker_ptr,
     const scalar_t* __restrict__ grad_ptr,
-    scalar_t* __restrict__ arena_ptr,
+    scalar_t* __restrict__ ik_ptr,
+    scalar_t* __restrict__ g_ptr,
     int H, int W, int h, int w, int out_h, int out_w,
-    int stride_img, int stride_ker, int stride_grad, int stride_arena,
+    int stride_img, int stride_ker, int stride_grad,
+    int stride_ik_plane, int stride_g_plane,
     int batch_size
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int b = blockIdx.z;
     if (b >= batch_size) return;
 
-    int base_arena = b * 3 * stride_arena;
+    if (idx >= H*W) return;
 
-    // Pack Image (Plane 0)
-    if (idx < H*W) {
-        arena_ptr[base_arena + idx] = img_ptr[b * stride_img + idx];
-    }
+    int r = idx / W;
+    int c = idx % W;
 
-    // Pack Kernel (Plane 1)
-    if (idx < h*w) {
-        int r = idx / w;
-        int c = idx % w;
-        int arena_idx = r * W + c;
-        arena_ptr[base_arena + stride_arena + arena_idx] = ker_ptr[b * stride_ker + idx];
-    }
+    int base_ik = b * 2 * stride_ik_plane;
+    int base_g  = b * 1 * stride_g_plane;
 
-    // Pack Grad (Plane 2)
-    if (idx < out_h * out_w) {
-        int r = idx / out_w;
-        int c = idx % out_w;
-        int arena_idx = r * W + c;
-        arena_ptr[base_arena + 2 * stride_arena + arena_idx] = grad_ptr[b * stride_grad + idx];
+    // 1. Pack Image -> IK Plane 0
+    ik_ptr[base_ik + idx] = img_ptr[b * stride_img + idx];
+
+    // 2. Pack Kernel -> IK Plane 1 (Padded)
+    scalar_t val_k = 0;
+    if (r < h && c < w) {
+        val_k = ker_ptr[b * stride_ker + r * w + c];
     }
+    ik_ptr[base_ik + stride_ik_plane + idx] = val_k;
+
+    // 3. Pack Grad -> G Plane 0 (Padded)
+    scalar_t val_g = 0;
+    if (r < out_h && c < out_w) {
+        val_g = grad_ptr[b * stride_grad + r * out_w + c];
+    }
+    g_ptr[base_g + idx] = val_g;
 }
 
 // Spectral BWD:
+// Reads IK and G. Writes dI, dK to IK.
 // dI (P0) = G * K
 // dK (P1) = I * conj(G)
 template <typename scalar_t>
-__global__ void spectral_bwd_kernel(
-    typename FFTTraits<scalar_t>::ComplexType* __restrict__ data_ptr,
+__global__ void spectral_bwd_split_kernel(
+    typename FFTTraits<scalar_t>::ComplexType* __restrict__ ik_ptr,
+    const typename FFTTraits<scalar_t>::ComplexType* __restrict__ g_ptr,
     scalar_t scale,
     int plane_stride,
     int batch_size
@@ -255,11 +261,12 @@ __global__ void spectral_bwd_kernel(
     if (b >= batch_size) return;
     if (idx >= plane_stride) return;
 
-    int base = b * 3 * plane_stride;
+    int base_ik = b * 2 * plane_stride;
+    int base_g  = b * 1 * plane_stride;
     
-    ComplexT I = data_ptr[base + 0 * plane_stride + idx];
-    ComplexT K = data_ptr[base + 1 * plane_stride + idx];
-    ComplexT G = data_ptr[base + 2 * plane_stride + idx];
+    ComplexT I = ik_ptr[base_ik + 0 * plane_stride + idx];
+    ComplexT K = ik_ptr[base_ik + 1 * plane_stride + idx];
+    ComplexT G = g_ptr[base_g + idx];
 
     // dI = G * K
     ComplexT dI = Traits::mul(G, K);
@@ -268,37 +275,36 @@ __global__ void spectral_bwd_kernel(
     ComplexT dK = Traits::mul(I, Traits::conj(G));
     
     // Store Back
-    data_ptr[base + 0 * plane_stride + idx] = Traits::make_complex(Traits::real(dI)*scale, Traits::imag(dI)*scale);
-    data_ptr[base + 1 * plane_stride + idx] = Traits::make_complex(Traits::real(dK)*scale, Traits::imag(dK)*scale);
+    ik_ptr[base_ik + 0 * plane_stride + idx] = Traits::make_complex(Traits::real(dI)*scale, Traits::imag(dI)*scale);
+    ik_ptr[base_ik + 1 * plane_stride + idx] = Traits::make_complex(Traits::real(dK)*scale, Traits::imag(dK)*scale);
 }
 
-// Finalize BWD: Crop dI (P0) and dK (P1)
+// Finalize BWD: Crop dI (P0) and dK (P1) from IK buffer
 template <typename scalar_t>
-__global__ void finalize_bwd_kernel(
-    const scalar_t* __restrict__ arena_ptr,
+__global__ void finalize_bwd_split_kernel(
+    const scalar_t* __restrict__ ik_ptr,
     scalar_t* __restrict__ dI_ptr,
     scalar_t* __restrict__ dK_ptr,
     int H, int W, int h, int w,
-    int stride_arena, int stride_dI, int stride_dK,
+    int stride_ik_plane, int stride_dI, int stride_dK,
     int batch_size
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int b = blockIdx.z;
     if (b >= batch_size) return;
+    if (idx >= H*W) return;
 
-    // Handle dI (Full Size H*W)
-    if (idx < H*W) {
-        // Plane 0
-        dI_ptr[b * stride_dI + idx] = arena_ptr[b * 3 * stride_arena + idx];
-    }
+    int r = idx / W;
+    int c = idx % W;
 
-    // Handle dK (Crop to h*w)
-    if (idx < h*w) {
-        int r = idx / w;
-        int c = idx % w;
-        int arena_idx = r * W + c;
-        // Plane 1
-        dK_ptr[b * stride_dK + idx] = arena_ptr[b * 3 * stride_arena + stride_arena + arena_idx];
+    int base_ik = b * 2 * stride_ik_plane;
+
+    // Handle dI (Full Size H*W) - Plane 0
+    dI_ptr[b * stride_dI + idx] = ik_ptr[base_ik + idx];
+
+    // Handle dK (Crop to h*w) - Plane 1
+    if (r < h && c < w) {
+        dK_ptr[b * stride_dK + r * w + c] = ik_ptr[base_ik + stride_ik_plane + idx];
     }
 }
 
@@ -308,18 +314,25 @@ __global__ void finalize_bwd_kernel(
 
 torch::Tensor fft_cc_forward_cuda(torch::Tensor image, torch::Tensor kernel) {
     return AT_DISPATCH_FLOATING_TYPES(image.scalar_type(), "fft_cc_forward_cuda", [&] {
+        TORCH_CHECK(image.dim() >= 2, "Image must have at least 2 dimensions");
+        TORCH_CHECK(kernel.dim() >= 2, "Kernel must have at least 2 dimensions");
+
         int H = image.size(-2);
         int W = image.size(-1);
         int h = kernel.size(-2);
         int w = kernel.size(-1);
         int B = image.numel() / (H*W);
+        TORCH_CHECK(kernel.numel() / (h*w) == B, "Batch size mismatch");
+
+        // Ensure contiguous inputs for raw kernels
+        auto image_contig = image.reshape({B, H, W}).contiguous();
+        auto kernel_contig = kernel.reshape({B, h, w}).contiguous();
 
         int out_h = H - h + 1;
         int out_w = W - w + 1;
 
-        // Allocation
-        // Arena: [B, 2, H, W]
-        auto arena = torch::zeros({B * 2, H, W}, image.options());
+        // Allocation: empty to avoid zero init, kernel handles padding
+        auto arena = torch::empty({B * 2, H, W}, image.options());
         int W_c = W / 2 + 1;
 
         auto complex_opts = image.options().dtype(
@@ -331,12 +344,12 @@ torch::Tensor fft_cc_forward_cuda(torch::Tensor image, torch::Tensor kernel) {
 
         // 1. Pack
         int threads = 256;
-        int total_pixels = H * W; // Max pixels to cover
+        int total_pixels = H * W;
         int blocks = (total_pixels + threads - 1) / threads;
         
         pack_fwd_kernel<scalar_t><<<dim3(blocks, 1, B), threads, 0, stream>>>(
-            image.data_ptr<scalar_t>(),
-            kernel.data_ptr<scalar_t>(),
+            image_contig.data_ptr<scalar_t>(),
+            kernel_contig.data_ptr<scalar_t>(),
             arena.data_ptr<scalar_t>(),
             H, W, h, w,
             H*W, h*w, H*W, B
@@ -363,11 +376,7 @@ torch::Tensor fft_cc_forward_cuda(torch::Tensor image, torch::Tensor kernel) {
             scale, total_spec, B
         );
 
-        // 4. IFFT (Only Plane 0 needed, but batch is 2? No, we only need Plane 0)
-        // Wait, cufftExecC2R expects contiguous batch.
-        // If we want only Plane 0, we can run IFFT on batch B, stride 2 * plane_stride?
-        // Or just run IFFT on B*2 and ignore Plane 1 output. Running on B*2 is simpler given the plan.
-
+        // 4. IFFT (Result in arena Plane 0)
         cufftHandle plan_c2r = CuFFTPlanCache::instance().get_plan(H, W, B * 2, Traits::C2R_TYPE);
         CUFFT_CHECK(cufftSetStream(plan_c2r, stream));
 
@@ -389,28 +398,43 @@ torch::Tensor fft_cc_forward_cuda(torch::Tensor image, torch::Tensor kernel) {
             H*W, out_h*out_w, B
         );
 
-        return out.reshape(change_h_w_shapes(image, out_h, out_w));
+        // Return contiguous output with correct shape
+        return out.contiguous().reshape(change_h_w_shapes(image, out_h, out_w));
     });
 }
 
 std::vector<torch::Tensor> fft_cc_backward_cuda(torch::Tensor grad_output, torch::Tensor image, torch::Tensor kernel) {
     return AT_DISPATCH_FLOATING_TYPES(image.scalar_type(), "fft_cc_backward_cuda", [&] {
+        TORCH_CHECK(image.dim() >= 2, "Image must have at least 2 dimensions");
+        TORCH_CHECK(kernel.dim() >= 2, "Kernel must have at least 2 dimensions");
+
         int H = image.size(-2);
         int W = image.size(-1);
         int h = kernel.size(-2);
         int w = kernel.size(-1);
         int B = image.numel() / (H*W);
+        TORCH_CHECK(kernel.numel() / (h*w) == B, "Batch size mismatch");
+
         int out_h = H - h + 1;
         int out_w = W - w + 1;
-
-        // Arena: [B, 3, H, W]
-        auto arena = torch::zeros({B * 3, H, W}, image.options());
         int W_c = W / 2 + 1;
+
+        // Ensure contiguous inputs
+        auto image_contig = image.reshape({B, H, W}).contiguous();
+        auto kernel_contig = kernel.reshape({B, h, w}).contiguous();
+        auto grad_contig = grad_output.reshape({B, out_h, out_w}).contiguous();
+
+        // Allocations: Separate IK and G
+        // Arena IK: [B, 2, H, W]
+        auto arena_ik = torch::empty({B * 2, H, W}, image.options());
+        // Arena G:  [B, 1, H, W]
+        auto arena_g  = torch::empty({B * 1, H, W}, image.options());
 
         auto complex_opts = image.options().dtype(
              std::is_same<scalar_t, double>::value ? torch::kComplexDouble : torch::kComplexFloat
         );
-        auto arena_c = torch::empty({B * 3, H, W_c}, complex_opts);
+        auto spec_ik = torch::empty({B * 2, H, W_c}, complex_opts);
+        auto spec_g  = torch::empty({B * 1, H, W_c}, complex_opts);
 
         cudaStream_t stream = at::cuda::getCurrentCUDAStream(image.device().index());
 
@@ -419,24 +443,37 @@ std::vector<torch::Tensor> fft_cc_backward_cuda(torch::Tensor grad_output, torch
         int total_pixels = H * W;
         int blocks = (total_pixels + threads - 1) / threads;
 
-        pack_bwd_kernel<scalar_t><<<dim3(blocks, 1, B), threads, 0, stream>>>(
-            image.data_ptr<scalar_t>(),
-            kernel.data_ptr<scalar_t>(),
-            grad_output.data_ptr<scalar_t>(),
-            arena.data_ptr<scalar_t>(),
+        pack_bwd_split_kernel<scalar_t><<<dim3(blocks, 1, B), threads, 0, stream>>>(
+            image_contig.data_ptr<scalar_t>(),
+            kernel_contig.data_ptr<scalar_t>(),
+            grad_contig.data_ptr<scalar_t>(),
+            arena_ik.data_ptr<scalar_t>(),
+            arena_g.data_ptr<scalar_t>(),
             H, W, h, w, out_h, out_w,
-            H*W, h*w, out_h*out_w, H*W, B
+            H*W, h*w, out_h*out_w,
+            H*W, H*W, // Stride planes
+            B
         );
 
-        // 2. FFT
+        // 2. FFTs
         using Traits = FFTTraits<scalar_t>;
-        cufftHandle plan_r2c = CuFFTPlanCache::instance().get_plan(H, W, B * 3, Traits::R2C_TYPE);
-        CUFFT_CHECK(cufftSetStream(plan_r2c, stream));
 
+        // IK FFT
+        cufftHandle plan_r2c_ik = CuFFTPlanCache::instance().get_plan(H, W, B * 2, Traits::R2C_TYPE);
+        CUFFT_CHECK(cufftSetStream(plan_r2c_ik, stream));
         if constexpr (std::is_same<scalar_t, float>::value) {
-            CUFFT_CHECK(cufftExecR2C(plan_r2c, arena.data_ptr<scalar_t>(), (cufftComplex*)arena_c.data_ptr()));
+            CUFFT_CHECK(cufftExecR2C(plan_r2c_ik, arena_ik.data_ptr<scalar_t>(), (cufftComplex*)spec_ik.data_ptr()));
         } else {
-            CUFFT_CHECK(cufftExecD2Z(plan_r2c, arena.data_ptr<scalar_t>(), (cufftDoubleComplex*)arena_c.data_ptr()));
+            CUFFT_CHECK(cufftExecD2Z(plan_r2c_ik, arena_ik.data_ptr<scalar_t>(), (cufftDoubleComplex*)spec_ik.data_ptr()));
+        }
+
+        // G FFT
+        cufftHandle plan_r2c_g = CuFFTPlanCache::instance().get_plan(H, W, B * 1, Traits::R2C_TYPE);
+        CUFFT_CHECK(cufftSetStream(plan_r2c_g, stream));
+        if constexpr (std::is_same<scalar_t, float>::value) {
+            CUFFT_CHECK(cufftExecR2C(plan_r2c_g, arena_g.data_ptr<scalar_t>(), (cufftComplex*)spec_g.data_ptr()));
+        } else {
+            CUFFT_CHECK(cufftExecD2Z(plan_r2c_g, arena_g.data_ptr<scalar_t>(), (cufftDoubleComplex*)spec_g.data_ptr()));
         }
 
         // 3. Spectral
@@ -444,41 +481,36 @@ std::vector<torch::Tensor> fft_cc_backward_cuda(torch::Tensor grad_output, torch
         blocks = (total_spec + threads - 1) / threads;
         scalar_t scale = 1.0f / (H * W);
 
-        spectral_bwd_kernel<scalar_t><<<dim3(blocks, 1, B), threads, 0, stream>>>(
-            (typename Traits::ComplexType*)arena_c.data_ptr(),
+        spectral_bwd_split_kernel<scalar_t><<<dim3(blocks, 1, B), threads, 0, stream>>>(
+            (typename Traits::ComplexType*)spec_ik.data_ptr(),
+            (typename Traits::ComplexType*)spec_g.data_ptr(),
             scale, total_spec, B
         );
 
-        // 4. IFFT (Need P0 and P1. We run on all 3 for simplicity because plan is cached, or make new plan for 2?)
-        // To save time, we should probably run IFFT on B*2 if we can slice.
-        // But memory is contiguous B*3.
-        // We can create a plan for B*3 and just ignore P2.
-        // Or we can create a plan with stride/dist to skip P2?
-        // Simpler: Just run IFFT on all 3.
-
-        cufftHandle plan_c2r = CuFFTPlanCache::instance().get_plan(H, W, B * 3, Traits::C2R_TYPE);
-        CUFFT_CHECK(cufftSetStream(plan_c2r, stream));
+        // 4. IFFT (Only on IK)
+        cufftHandle plan_c2r_ik = CuFFTPlanCache::instance().get_plan(H, W, B * 2, Traits::C2R_TYPE);
+        CUFFT_CHECK(cufftSetStream(plan_c2r_ik, stream));
 
         if constexpr (std::is_same<scalar_t, float>::value) {
-            CUFFT_CHECK(cufftExecC2R(plan_c2r, (cufftComplex*)arena_c.data_ptr(), arena.data_ptr<scalar_t>()));
+            CUFFT_CHECK(cufftExecC2R(plan_c2r_ik, (cufftComplex*)spec_ik.data_ptr(), arena_ik.data_ptr<scalar_t>()));
         } else {
-            CUFFT_CHECK(cufftExecZ2D(plan_c2r, (cufftDoubleComplex*)arena_c.data_ptr(), arena.data_ptr<scalar_t>()));
+            CUFFT_CHECK(cufftExecZ2D(plan_c2r_ik, (cufftDoubleComplex*)spec_ik.data_ptr(), arena_ik.data_ptr<scalar_t>()));
         }
 
         // 5. Finalize
-        auto dI = torch::empty_like(image);
-        auto dK = torch::empty_like(kernel);
+        auto dI = torch::empty({B, H, W}, image.options());
+        auto dK = torch::empty({B, h, w}, image.options());
 
         blocks = (total_pixels + threads - 1) / threads;
 
-        finalize_bwd_kernel<scalar_t><<<dim3(blocks, 1, B), threads, 0, stream>>>(
-            arena.data_ptr<scalar_t>(),
+        finalize_bwd_split_kernel<scalar_t><<<dim3(blocks, 1, B), threads, 0, stream>>>(
+            arena_ik.data_ptr<scalar_t>(),
             dI.data_ptr<scalar_t>(),
             dK.data_ptr<scalar_t>(),
             H, W, h, w,
             H*W, H*W, h*w, B
         );
 
-        return {dI, dK};
+        return {dI.contiguous().reshape(image.sizes()), dK.contiguous().reshape(kernel.sizes())};
     });
 }

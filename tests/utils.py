@@ -3,7 +3,7 @@ import torch
 import numpy as np
 from scipy import signal
 
-def naive_cc(image, kernel):
+def naive_cc(image, kernel, normalize=False):
     """
     Naive cross-correlation using only torch, unfold, and no FFT. Batched.
     Args:
