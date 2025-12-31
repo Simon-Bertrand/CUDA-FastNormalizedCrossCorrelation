@@ -17,9 +17,7 @@ Index $v$ iterates over the spatial domain of the kernel ($0 \le v_y < h, 0 \le 
 
 ### Forward Pass
 The standard Cross-Correlation is defined as:
-$$
-O(u) = (I \star T)(u) = \sum_{v} I(u+v) \cdot T(v)
-$$
+$$O(u) = (I \star T)(u) = \sum_{v} I(u+v) \cdot T(v)$$
 
 ### Backward Pass
 
@@ -28,32 +26,22 @@ We need to compute the gradients with respect to the inputs: $\frac{\partial L}{
 
 #### Gradient w.r.t Image ($I$)
 By the chain rule:
-$$
-\frac{\partial L}{\partial I(k)} = \sum_{u} \frac{\partial L}{\partial O(u)} \frac{\partial O(u)}{\partial I(k)}
-$$
+$$\frac{\partial L}{\partial I(k)} = \sum_{u} \frac{\partial L}{\partial O(u)} \frac{\partial O(u)}{\partial I(k)}$$
 From the definition of $O(u)$, $\frac{\partial O(u)}{\partial I(k)} = T(k-u)$ if $k-u$ is a valid index in $T$, and 0 otherwise.
 Let $v = k-u$, so $u = k-v$.
 $$
 \frac{\partial L}{\partial I(k)} = \sum_{v} \frac{\partial L}{\partial O(k-v)} \cdot T(v)
 $$
 This operation corresponds to the **convolution** of the upstream gradient $\frac{\partial L}{\partial O}$ with the kernel $T$ (flipped if strictly speaking convolution, but usually implemented as correlation with appropriate indexing).
-$$
-\frac{\partial L}{\partial I} = \frac{\partial L}{\partial O} \ast T
-$$
+$$\frac{\partial L}{\partial I} = \frac{\partial L}{\partial O} \ast T$$
 (Where $\ast$ denotes full convolution).
 
 #### Gradient w.r.t Template ($T$)
-$$
-\frac{\partial L}{\partial T(v)} = \sum_{u} \frac{\partial L}{\partial O(u)} \frac{\partial O(u)}{\partial T(v)}
-$$
+$$\frac{\partial L}{\partial T(v)} = \sum_{u} \frac{\partial L}{\partial O(u)} \frac{\partial O(u)}{\partial T(v)}$$
 From $O(u)$, $\frac{\partial O(u)}{\partial T(v)} = I(u+v)$.
-$$
-\frac{\partial L}{\partial T(v)} = \sum_{u} \frac{\partial L}{\partial O(u)} \cdot I(u+v)
-$$
-This operation corresponds to the correlation between the Image $I$ and the upstream gradient $\frac{\partial L}{\partial O}$.
-$$
-\frac{\partial L}{\partial T} = I \star \frac{\partial L}{\partial O}
-$$
+$$\frac{\partial L}{\partial T(v)} = \sum_{u} \frac{\partial L}{\partial O(u)} \cdot I(u+v)$$
+This operation corresponds to the correlation between the Image $I$ and the upstream gradient $\frac{\partial L}{\partial O}$.$$
+\frac{\partial L}{\partial T} = I \star \frac{\partial L}{\partial O}$$
 
 ---
 
@@ -66,45 +54,27 @@ This is the more complex operator.
 **Step 1: Template Standardization**
 The template $T$ is globally standardized.
 Let $\mu_{T}$ be the mean of $T$ and $\sigma_{T}$ be the standard deviation (uncorrected).
-$$
-\mu_{T} = \frac{1}{N} \sum_v T(v)
-$$
-$$
-\sigma_{T} = \sqrt{ \frac{1}{N} \sum_v (T(v) - \mu_{T})^2 }
-$$
+$$\mu_{T} = \frac{1}{N} \sum_v T(v)$$
+$$\sigma_{T} = \sqrt{ \frac{1}{N} \sum_v (T(v) - \mu_{T})^2 }$$
 The standardized template is:
-$$
-\hat{T}(v) = \frac{T(v) - \mu_{T}}{\sigma_{T}}
-$$
+$$\hat{T}(v) = \frac{T(v) - \mu_{T}}{\sigma_{T}}$$
 Note that $\sum_v \hat{T}(v) = 0$ and $\sum_v \hat{T}(v)^2 = N$.
 
 **Step 2: Local Image Standardization**
 For each window $u$, we calculate the local mean $\mu_{I_u}$ and local standard deviation $\sigma_{I_u}$.
-$$
-\mu_{I_u} = \frac{1}{N} \sum_v I(u+v)
-$$
-$$
-\sigma_{I_u} = \sqrt{ \frac{1}{N} \sum_v (I(u+v) - \mu_{I_u})^2 }
-$$
+$$\mu_{I_u} = \frac{1}{N} \sum_v I(u+v)$$
+$$\sigma_{I_u} = \sqrt{ \frac{1}{N} \sum_v (I(u+v) - \mu_{I_u})^2 }$$
 The locally standardized image patch is:
-$$
-\hat{I}_{u}(v) = \frac{I(u+v) - \mu_{I_u}}{\sigma_{I_u}}
-$$
+$$\hat{I}_{u}(v) = \frac{I(u+v) - \mu_{I_u}}{\sigma_{I_u}}$$
 
 **Step 3: ZNCC Calculation**
 The ZNCC score at $u$ is the dot product of the standardized vectors divided by $N$.
 The implementation effectively computes:
-$$
-Z(u) = \frac{1}{\sigma_{T} \sigma_{I_u}} \sum_v (I(u+v) - \mu_{I_u})(T(v) - \mu_{T})
-$$
+$$Z(u) = \frac{1}{\sigma_{T} \sigma_{I_u}} \sum_v (I(u+v) - \mu_{I_u})(T(v) - \mu_{T})$$
 Using the fact that $\sum (T(v)-\mu_{T}) = 0$, the term involving $\mu_{I_u}$ vanishes:
-$$
-\sum_v (I(u+v) - \mu_{I_u})(T(v) - \mu_{T}) = \sum_v I(u+v)(T(v) - \mu_{T}) - \mu_{I_u} \cdot 0
-$$
+$$\sum_v (I(u+v) - \mu_{I_u})(T(v) - \mu_{T}) = \sum_v I(u+v)(T(v) - \mu_{T}) - \mu_{I_u} \cdot 0$$
 So:
-$$
-Z(u) = \frac{1}{\sigma_{I_u}} \sum_v I(u+v) \hat{T}(v)
-$$
+$$Z(u) = \frac{1}{\sigma_{I_u}} \sum_v I(u+v) \hat{T}(v)$$
 (Note: The factor $1/\sigma_{T}$ is absorbed into $\hat{T}$).
 
 Let $C(u) = \sum_v I(u+v) \hat{T}(v)$. This is the standard cross-correlation of $I$ with the pre-standardized template $\hat{T}$.
@@ -119,7 +89,7 @@ Let $\delta(u) = \frac{\partial L}{\partial Z(u)}$.
 #### Gradient w.r.t Image ($I$)
 
 We analyze the contribution of a single output pixel $Z(u)$ to the gradient of the input pixel $I(k)$.
-$$\frac{\partial Z(u)}{\partial I(k)} = \frac{\partial}{\partial I(k)} \left( C(u) \sigma_{I_u}^{-1} \right$$
+$$\frac{\partial Z(u)}{\partial I(k)} = \frac{\partial}{\partial I(k)} \left( C(u) \sigma_{I_u}^{-1} \right)$$
 $$= \sigma_{I_u}^{-1} \frac{\partial C(u)}{\partial I(k)} + C(u) \frac{\partial \sigma_{I_u}^{-1}}{\partial I(k)}$$
 
 **Term A:** $\frac{\partial C(u)}{\partial I(k)}$
