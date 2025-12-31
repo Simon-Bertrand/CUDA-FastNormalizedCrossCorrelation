@@ -40,8 +40,10 @@ $$\frac{\partial L}{\partial I} = \frac{\partial L}{\partial O} \ast T$$
 $$\frac{\partial L}{\partial T(v)} = \sum_{u} \frac{\partial L}{\partial O(u)} \frac{\partial O(u)}{\partial T(v)}$$
 From $O(u)$, $\frac{\partial O(u)}{\partial T(v)} = I(u+v)$.
 $$\frac{\partial L}{\partial T(v)} = \sum_{u} \frac{\partial L}{\partial O(u)} \cdot I(u+v)$$
-This operation corresponds to the correlation between the Image $I$ and the upstream gradient $\frac{\partial L}{\partial O}$.$$
-\frac{\partial L}{\partial T} = I \star \frac{\partial L}{\partial O}$$
+This operation corresponds to the correlation between the Image $I$ and the upstream gradient $\frac{\partial L}{\partial O}$.
+$$
+\frac{\partial L}{\partial T} = I \star \frac{\partial L}{\partial O}
+$$
 
 ---
 
@@ -54,18 +56,30 @@ This is the more complex operator.
 **Step 1: Template Standardization**
 The template $T$ is globally standardized.
 Let $\mu_{T}$ be the mean of $T$ and $\sigma_{T}$ be the standard deviation (uncorrected).
-$$\mu_{T} = \frac{1}{N} \sum_v T(v)$$
-$$\sigma_{T} = \sqrt{ \frac{1}{N} \sum_v (T(v) - \mu_{T})^2 }$$
+$$
+\mu_{T} = \frac{1}{N} \sum_v T(v)
+$$
+$$
+\sigma_{T} = \sqrt{ \frac{1}{N} \sum_v (T(v) - \mu_{T})^2 }
+$$
 The standardized template is:
-$$\hat{T}(v) = \frac{T(v) - \mu_{T}}{\sigma_{T}}$$
+$$
+\hat{T}(v) = \frac{T(v) - \mu_{T}}{\sigma_{T}}
+$$
 Note that $\sum_v \hat{T}(v) = 0$ and $\sum_v \hat{T}(v)^2 = N$.
 
 **Step 2: Local Image Standardization**
 For each window $u$, we calculate the local mean $\mu_{I_u}$ and local standard deviation $\sigma_{I_u}$.
-$$\mu_{I_u} = \frac{1}{N} \sum_v I(u+v)$$
-$$\sigma_{I_u} = \sqrt{ \frac{1}{N} \sum_v (I(u+v) - \mu_{I_u})^2 }$$
+$$
+\mu_{I_u} = \frac{1}{N} \sum_v I(u+v)
+$$
+$$
+\sigma_{I_u} = \sqrt{ \frac{1}{N} \sum_v (I(u+v) - \mu_{I_u})^2 }
+$$
 The locally standardized image patch is:
-$$\hat{I}_{u}(v) = \frac{I(u+v) - \mu_{I_u}}{\sigma_{I_u}}$$
+$$
+\hat{I}_{u}(v) = \frac{I(u+v) - \mu_{I_u}}{\sigma_{I_u}}
+$$
 
 **Step 3: ZNCC Calculation**
 The ZNCC score at $u$ is the dot product of the standardized vectors divided by $N$.
@@ -74,7 +88,9 @@ $$Z(u) = \frac{1}{\sigma_{T} \sigma_{I_u}} \sum_v (I(u+v) - \mu_{I_u})(T(v) - \m
 Using the fact that $\sum (T(v)-\mu_{T}) = 0$, the term involving $\mu_{I_u}$ vanishes:
 $$\sum_v (I(u+v) - \mu_{I_u})(T(v) - \mu_{T}) = \sum_v I(u+v)(T(v) - \mu_{T}) - \mu_{I_u} \cdot 0$$
 So:
-$$Z(u) = \frac{1}{\sigma_{I_u}} \sum_v I(u+v) \hat{T}(v)$$
+$$
+Z(u) = \frac{1}{\sigma_{I_u}} \sum_v I(u+v) \hat{T}(v)
+$$
 (Note: The factor $1/\sigma_{T}$ is absorbed into $\hat{T}$).
 
 Let $C(u) = \sum_v I(u+v) \hat{T}(v)$. This is the standard cross-correlation of $I$ with the pre-standardized template $\hat{T}$.
@@ -89,8 +105,12 @@ Let $\delta(u) = \frac{\partial L}{\partial Z(u)}$.
 #### Gradient w.r.t Image ($I$)
 
 We analyze the contribution of a single output pixel $Z(u)$ to the gradient of the input pixel $I(k)$.
-$$\frac{\partial Z(u)}{\partial I(k)} = \frac{\partial}{\partial I(k)} \left( C(u) \sigma_{I_u}^{-1} \right)$$
-$$= \sigma_{I_u}^{-1} \frac{\partial C(u)}{\partial I(k)} + C(u) \frac{\partial \sigma_{I_u}^{-1}}{\partial I(k)}$$
+$$
+\frac{\partial Z(u)}{\partial I(k)} = \frac{\partial}{\partial I(k)} \left( C(u) \sigma_{I_u}^{-1} \right)
+$$
+$$
+= \sigma_{I_u}^{-1} \frac{\partial C(u)}{\partial I(k)} + C(u) \frac{\partial \sigma_{I_u}^{-1}}{\partial I(k)}
+$$
 
 **Term A:** $\frac{\partial C(u)}{\partial I(k)}$
 $$C(u) = \sum_v \hat{T}(v) I(u+v)$$
@@ -103,7 +123,9 @@ $$\frac{\partial \sigma_{I_u}^2}{\partial I(k)} = \frac{1}{N} \cdot 2 I(k) - 2 \
 Since $\mu_{I_u} = \frac{1}{N} \sum I$, $\frac{\partial \mu_{I_u}}{\partial I(k)} = \frac{1}{N}$.
 $$\frac{\partial \sigma_{I_u}^2}{\partial I(k)} = \frac{2}{N} (I(k) - \mu_{I_u})$$
 Substituting back:
-$$\frac{\partial \sigma_{I_u}^{-1}}{\partial I(k)} = -\frac{1}{2\sigma_{I_u}^3} \frac{2}{N} (I(k) - \mu_{I_u}) = -\frac{1}{N \sigma_{I_u}^2} \hat{I}_{u}(k-u)$$
+$$
+\frac{\partial \sigma_{I_u}^{-1}}{\partial I(k)} = -\frac{1}{2\sigma_{I_u}^3} \frac{2}{N} (I(k) - \mu_{I_u}) = -\frac{1}{N \sigma_{I_u}^2} \hat{I}_{u}(k-u)
+$$
 
 **Combining Terms:**
 $$\frac{\partial Z(u)}{\partial I(k)} = \frac{1}{\sigma_{I_u}} \hat{T}(k-u) + C(u) \left( -\frac{1}{N \sigma_{I_u}^2} \hat{I}_{u}(k-u) \right)$$
@@ -111,8 +133,12 @@ Since $Z(u) = C(u) / \sigma_{I_u}$:
 $$\frac{\partial Z(u)}{\partial I(k)} = \frac{1}{\sigma_{I_u}} \left( \hat{T}(k-u) - \frac{Z(u)}{N} \hat{I}_{u}(k-u) \right)$$
 
 **Total Gradient:**
-$$\frac{\partial L}{\partial I(k)} = \sum_u \delta(u) \frac{\partial Z(u)}{\partial I(k)}$$
-$$\frac{\partial L}{\partial I(k)} = \sum_u \frac{\delta(u)}{\sigma_{I_u}} \left( \hat{T}(k-u) - \frac{Z(u)}{N} \hat{I}_{u}(k-u) \right)$$
+$$
+\frac{\partial L}{\partial I(k)} = \sum_u \delta(u) \frac{\partial Z(u)}{\partial I(k)}
+$$
+$$
+\frac{\partial L}{\partial I(k)} = \sum_u \frac{\delta(u)}{\sigma_{I_u}} \left( \hat{T}(k-u) - \frac{Z(u)}{N} \hat{I}_{u}(k-u) \right)
+$$
 
 This can be interpreted as:
 1. Backpropagate $\frac{\delta(u)}{\sigma_{I_u}}$ through the correlation with $\hat{T}$.
