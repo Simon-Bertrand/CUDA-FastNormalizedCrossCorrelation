@@ -252,6 +252,7 @@ __global__ void finalize_kernel(
     scalar_t* __restrict__ out_ptr,
     const scalar_t* __restrict__ ker_norms,
     scalar_t sqrt_N,
+    scalar_t N_val,
     int arena_stride,   // img_h * img_w
     int img_w,          // to calc y
     int out_w,          // to calc x/y from idx
@@ -280,13 +281,12 @@ __global__ void finalize_kernel(
         scalar_t sum_i  = arena_ptr[base + 1 * arena_stride + arena_idx];
         scalar_t sum_i2 = arena_ptr[base + 2 * arena_stride + arena_idx];
 
-        scalar_t N = sqrt_N * sqrt_N;
-        scalar_t var_term = N * sum_i2 - (sum_i * sum_i);
+        // Use N_val explicitly passed for variance calculation
+        scalar_t var_term = N_val * sum_i2 - (sum_i * sum_i);
         var_term = Traits::fmax(var_term, static_cast<scalar_t>(0.0));
         
         scalar_t t_norm = ker_norms[b];
 
-        // Use smaller epsilon for double precision to avoid suppressing valid correlations
         scalar_t epsilon = std::is_same<scalar_t, double>::value ? static_cast<scalar_t>(1e-6) : static_cast<scalar_t>(1e-5);
 
         if (var_term < epsilon || 
@@ -346,7 +346,6 @@ torch::Tensor fft_cross_correlation_impl(
     int arena_stride = img_h * img_w; 
     auto real_arena = torch::zeros({batch_size * stack_depth, img_h, img_w}, image.options());
 
-    // For Complex tensor allocation, we need to pick correct ComplexFloat/ComplexDouble
     auto complex_options = image.options().dtype(
         std::is_same<scalar_t, double>::value ? torch::kComplexDouble : torch::kComplexFloat
     );
@@ -356,6 +355,7 @@ torch::Tensor fft_cross_correlation_impl(
     torch::Tensor ker_norms;
     torch::Tensor kernel_to_pack = kernel;
     scalar_t sqrt_N = 1.0;
+    scalar_t N_val = 1.0;
 
     // Per-image mean for stability
     torch::Tensor img_means;
@@ -367,7 +367,8 @@ torch::Tensor fft_cross_correlation_impl(
         
         ker_norms = k_centered.norm(2, {1});
         kernel_to_pack = k_centered.view({batch_size, kernel_h, kernel_w}).contiguous();
-        sqrt_N = std::sqrt(static_cast<scalar_t>(kernel_h * kernel_w));
+        N_val = static_cast<scalar_t>(kernel_h * kernel_w);
+        sqrt_N = std::sqrt(N_val);
 
         // Compute image means [B]
         auto img_flat = image.reshape({batch_size, -1});
@@ -379,8 +380,6 @@ torch::Tensor fft_cross_correlation_impl(
     // 3. Step 1: Pack
     int plane_size_bytes = batch_size * arena_stride * sizeof(scalar_t);
     scalar_t* raw_arena = real_arena.data_ptr<scalar_t>();
-
-    // Note: real_arena is allocated with torch::zeros, so we don't need cudaMemsetAsync.
 
     const int CUDA_MAX_GRID_Z = 65535;
     auto launch_loop_batches = [&](auto kernel_launcher) {
@@ -417,7 +416,6 @@ torch::Tensor fft_cross_correlation_impl(
     // 4. FFT
     CUFFT_CHECK(cufftSetStream(plan_r2c, stream));
 
-    // Dispatch to correct Exec function
     if constexpr (std::is_same<scalar_t, float>::value) {
         CUFFT_CHECK(cufftExecR2C(plan_r2c, real_arena.data_ptr<scalar_t>(), reinterpret_cast<cufftComplex*>(cpx_arena.data_ptr())));
     } else {
@@ -459,7 +457,7 @@ torch::Tensor fft_cross_correlation_impl(
             real_arena.data_ptr<scalar_t>(),
             final_result.data_ptr<scalar_t>(),
             ker_norms.data_ptr<scalar_t>(),
-            sqrt_N,
+            sqrt_N, N_val,
             total_pixels, img_w, crop_w, total_out_pixels,
             normalize, batch_offset, batch_size
         );
@@ -470,6 +468,7 @@ torch::Tensor fft_cross_correlation_impl(
     return final_result.reshape(change_h_w_shapes(image, crop_h, crop_w));
 }
 
+// ... rest of the file ...
 // ==================================================================================
 // 1. FUNCTIONAL API (CUDA)
 // ==================================================================================
