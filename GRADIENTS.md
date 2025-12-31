@@ -131,7 +131,7 @@ The Jacobian of Standardization is standard for Batch/Layer Norm:
 $$ \frac{\partial L}{\partial T(j)} = \frac{1}{\sigma_T} \left( \frac{\partial L}{\partial \hat{T}(j)} - \frac{1}{N} \sum_v \frac{\partial L}{\partial \hat{T}(v)} - \frac{\hat{T}(j)}{N} \sum_v \frac{\partial L}{\partial \hat{T}(v)} \hat{T}(v) \right) $$
 
 Let $G_{\hat{T}} = \nabla_{\hat{T}} L$.
-$$ \nabla_T L = \frac{1}{\sigma_T} \left( G_{\hat{T}} - \text{mean}(G_{\hat{T}}) - \hat{T} \cdot \langle G_{\hat{T}}, \hat{T} \rangle_{\text{avg}} \right) $$
+$$ \nabla_T L = \frac{1}{\sigma_T} \left( G_{\hat{T}} - \mathrm{mean}(G_{\hat{T}}) - \hat{T} \cdot \langle G_{\hat{T}}, \hat{T} \rangle_{\mathrm{avg}} \right) $$
 
 ### Summary of ZNCC Backward Steps
 
