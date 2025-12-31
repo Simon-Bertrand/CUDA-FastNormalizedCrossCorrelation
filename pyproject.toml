@@ -1,0 +1,18 @@
+[build-system]
+requires = [
+    "setuptools>=42",
+    "wheel",
+    "torch",
+    "numpy"
+]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cuda_kernels"
+version = "0.1.0"
+description = "PyTorch CUDA C++ extension modules"
+requires-python = ">=3.7"
+
+[tool.setuptools]
+packages = []
+include-package-data = false
