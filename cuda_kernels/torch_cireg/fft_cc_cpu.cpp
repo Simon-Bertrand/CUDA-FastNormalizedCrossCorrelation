@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstring>
 #include <complex>
+#include <type_traits>
 #include "fft_cc.h"
 
 // ==================================================================================

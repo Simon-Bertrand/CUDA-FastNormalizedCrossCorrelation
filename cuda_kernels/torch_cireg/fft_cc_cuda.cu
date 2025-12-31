@@ -10,6 +10,7 @@
 #include <vector>
 #include <iostream>
 #include <cmath> 
+#include <type_traits>
 #include "fft_cc.h"
 
 // ==================================================================================
