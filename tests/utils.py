@@ -3,91 +3,38 @@ import torch
 import numpy as np
 from scipy import signal
 
-def naive_cc(image, kernel, normalize=False):
+def naive_cc(image, kernel):
     """
-    Naive implementation of CC/ZNCC using scipy.signal.fftconvolve for reference.
-    This works on CPU (numpy).
+    Naive cross-correlation using only torch, unfold, and no FFT. Batched.
+    Args:
+        image: [B, H, W] torch.Tensor or numpy.ndarray
+        kernel: [B, h, w] torch.Tensor or numpy.ndarray
+    Returns:
+        out: [B, H-h+1, W-w+1] torch.Tensor
     """
-    if isinstance(image, torch.Tensor):
-        image = image.detach().cpu().numpy()
-    if isinstance(kernel, torch.Tensor):
-        kernel = kernel.detach().cpu().numpy()
-
-    # Handle batch dimension by iterating
-    # image: [B, H, W]
-    # kernel: [B, h, w]
+    if not isinstance(image, torch.Tensor):
+        image = torch.from_numpy(image)
+    if not isinstance(kernel, torch.Tensor):
+        kernel = torch.from_numpy(kernel)
+    # Ensure float
+    image = image.float()
+    kernel = kernel.float()
 
     B, H, W = image.shape
     _, h, w = kernel.shape
+    out_h = H - h + 1
+    out_w = W - w + 1
 
-    out_list = []
+    # Unfold image to all sliding windows
+    # Shape: [B, h*w, out_h*out_w]
+    image_unf = torch.nn.functional.unfold(image.unsqueeze(1), (h, w)).view(B, h*w, out_h*out_w)
 
-    for b in range(B):
-        I = image[b]
-        K = kernel[b]
+    # Unfold kernel for each batch, flatten kernel to (B, h*w, 1)
+    kernel_unf = kernel.view(B, 1, h*w).transpose(1,2)  # (B, h*w, 1)
 
-        if normalize:
-            # ZNCC
-            # Correlation = sum((I - mean_I)(K - mean_K)) / (std_I * std_K * N)
+    # (B, h*w, out_h*out_w) * (B, h*w, 1) -> (B, out_h*out_w)
+    out = (image_unf * kernel_unf).sum(dim=1)
 
-            # 1. Normalize Kernel
-            K_mean = np.mean(K)
-            K_norm = K - K_mean
-            K_std = np.linalg.norm(K_norm)
-
-            if K_std < 1e-6:
-                out_list.append(np.zeros((H - h + 1, W - w + 1)))
-                continue
-
-            # 2. Compute numerator: sum(I * K_norm) - sum(I)*mean(K_norm)
-            # Since mean(K_norm) is 0, Numerator = sum(I * K_norm)
-            # We use correlation, so we flip kernel for convolution
-            # But scipy.signal.correlate2d or fftconvolve with flipped kernel
-            # fftconvolve(I, K_flipped, mode='valid') -> Correlation
-
-            K_flipped = K_norm[::-1, ::-1]
-            numerator = signal.fftconvolve(I, K_flipped, mode='valid')
-
-            # 3. Compute Local Variance of Image
-            # Var(I) = E[I^2] - (E[I])^2
-            # Sums computed via convolution with ones
-            ones = np.ones((h, w))
-            N = h * w
-
-            sum_I = signal.fftconvolve(I, ones, mode='valid')
-            sum_I2 = signal.fftconvolve(I**2, ones, mode='valid')
-
-            # Variance * N^2 = N * sum_I2 - sum_I^2
-            var_term = N * sum_I2 - sum_I**2
-            var_term = np.maximum(var_term, 0)
-
-            local_std = np.sqrt(var_term) # This is N * sigma_I
-
-            # Denominator = (N * sigma_I) * sigma_K / sqrt(N)?
-            # Wait.
-            # Denom = sqrt(sum(I_centered^2)) * sqrt(sum(K_centered^2))
-            # sqrt(sum(I_centered^2)) = sqrt(N * sigma_I^2) = sqrt(N) * sigma_I
-            # local_std calculated above is sqrt(N^2 * sigma_I^2) = N * sigma_I
-            # So sqrt(sum(I_centered^2)) = local_std / sqrt(N)
-
-            # Formula: Num / ( sqrt(sum(I^2)) * sqrt(sum(K^2)) )
-            # = Num / ( (local_std / sqrt(N)) * K_std )
-            # = (Num * sqrt(N)) / (local_std * K_std)
-
-            denom = local_std * K_std
-
-            # Handle division by zero
-            with np.errstate(divide='ignore', invalid='ignore'):
-                res = (numerator * np.sqrt(N)) / denom
-
-            res[denom < 1e-5] = 0
-            out_list.append(res)
-
-        else:
-            # Standard CC
-            # Just correlation
-            K_flipped = K[::-1, ::-1]
-            res = signal.fftconvolve(I, K_flipped, mode='valid')
-            out_list.append(res)
-
-    return torch.tensor(np.stack(out_list), dtype=torch.float32)
+    # Reshape to (B, out_h, out_w)
+    out = out.view(B, out_h, out_w)
+    return out.cpu()
