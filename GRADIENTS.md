@@ -94,9 +94,13 @@ $$
 **Step 3: ZNCC Calculation**
 The ZNCC score at $u$ is the dot product of the standardized vectors divided by $N$.
 The implementation effectively computes:
-$$Z(u) = \frac{1}{\sigma_{T} \sigma_{I_u}} \sum_v (I(u+v) - \mu_{I_u})(T(v) - \mu_{T})$$
+$$
+Z(u) = \frac{1}{\sigma_{T} \sigma_{I_u}} \sum_v (I(u+v) - \mu_{I_u})(T(v) - \mu_{T})
+$$
 Using the fact that $\sum (T(v)-\mu_{T}) = 0$, the term involving $\mu_{I_u}$ vanishes:
-$$\sum_v (I(u+v) - \mu_{I_u})(T(v) - \mu_{T}) = \sum_v I(u+v)(T(v) - \mu_{T}) - \mu_{I_u} \cdot 0$$
+$$
+\sum_v (I(u+v) - \mu_{I_u})(T(v) - \mu_{T}) = \sum_v I(u+v)(T(v) - \mu_{T}) - \mu_{I_u} \cdot 0
+$$
 So:
 $$
 Z(u) = \frac{1}{\sigma_{I_u}} \sum_v I(u+v) \hat{T}(v)
