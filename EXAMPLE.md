@@ -1,24 +1,10 @@
 ```python
-import os
-import sys
-
-# Jupyter notebook: kill/restart the kernel
-from IPython.display import display, Javascript
-
-display(Javascript("Jupyter.notebook.kernel.restart()"))
-
-```
-
-
-    <IPython.core.display.Javascript object>
-
-
-
-```python
 !uv pip install . --no-build-isolation --force-reinstall
 ```
 
-    [2mUsing Python 3.12.3 environment at: ...
+    [2mUsing Python 3.12.3 environment at:...
+    
+
 
 ```python
 import torch
@@ -27,8 +13,8 @@ import torch_cireg
 H,W = 256,256
 h,w = 64,64
 
-a = 5*torch.rand(3,4,H, H, device='cuda')
-b =5* torch.rand(3,4,h, w, device='cuda')
+a = 5* torch.rand(3,4,H, H, device='cuda')
+b = 5* torch.rand(3,4,h, w, device='cuda')
 
 ```
 
@@ -37,7 +23,7 @@ b =5* torch.rand(3,4,h, w, device='cuda')
 %timeit torch_cireg.fft_cc(a,b)
 ```
 
-    162 μs ± 979 ns per loop (mean ± std. dev. of 7 runs, 10,000 loops each)
+    162 μs ± 1.58 μs per loop (mean ± std. dev. of 7 runs, 10,000 loops each)
     
 
 
@@ -45,7 +31,7 @@ b =5* torch.rand(3,4,h, w, device='cuda')
 %timeit torch_cireg.fft_zncc(a,b)
 ```
 
-    615 μs ± 36.9 μs per loop (mean ± std. dev. of 7 runs, 1,000 loops each)
+    591 μs ± 7.44 μs per loop (mean ± std. dev. of 7 runs, 1,000 loops each)
     
 
 
@@ -97,6 +83,6 @@ plt.show()
 
 
     
-![png](public/dbg_5_0.png)
+![png](public/dbg_4_0.png)
     
 
