@@ -1,92 +1,122 @@
-# Torch CiReg: Fast FFT Cross-Correlation for PyTorch
+# Torch CiReg: Fast FFT ZNCC & Cross-Correlation for PyTorch
 
-This repository contains a high-performance **PyTorch C++/CUDA Extension** for computing 2D Cross-Correlation using Fast Fourier Transforms (FFT).
+This repository contains a high-performance **PyTorch C++/CUDA Extension** for computing **Zero-Normalized Cross-Correlation (ZNCC)** and standard Cross-Correlation using Fast Fourier Transforms (FFT).
 
-It is designed to be significantly faster than naive spatial implementations for large kernels and images, utilizing **cuFFT** for GPU acceleration and optimizations like batched R2C transforms and minimized memory allocations.
+It allows for extremely fast image template matching and registration tasks, offering significant speedups over naive spatial implementations (especially for large kernels) while maintaining full differentiability.
 
 ## Features
 
-- **Standard Cross-Correlation**: efficiently computes $O = I \star K$.
-- **Dual Device Support**:
-  - **CUDA**: Optimized custom kernels using `cuFFT` with single contiguous memory allocation for high throughput.
-  - **CPU**: Fallback implementation using multithreaded operations (via PyTorch/CPU ops).
+- **Zero-Normalized Cross-Correlation (ZNCC)**:
+  - Robust matching invariant to local brightness and contrast changes.
+  - Efficiently computes:
+    $$ZNCC(I, K) = \frac{(I - \mu_{local}) \cdot (K - \mu_{global}) / \sigma_{global}}{\sigma_{local} \cdot \sqrt{N}}$$
+  - Uses a **Fused CUDA Kernel** to compute local standard deviation maps rapidly.
+  
+- **Standard Cross-Correlation**:
+  - Efficient FFT-based computation: $O = I \star K$.
+  
+- **Performance Optimized**:
+  - **CUDA**: Custom kernels utilizing `cuFFT` with batched R2C transforms and in-place operations to minimize memory usage.
+  - **Fused Kernels**: Local variance calculation is fused into single passes to reduce global memory checks.
+  - **CPU Fallback**: Multithreaded implementations for non-CUDA environments.
+
 - **Full Autograd Support**:
-  - Custom C++ `torch::autograd::Function` implementation.
   - Differentiable with respect to both **Image** and **Kernel**.
-  - Backward pass rigorously verified against naive spatial implementations.
-- **Precision**: Supports `float32` and `float64` (Double precision).
-- **Correctness**: Verified with property-based testing (`hypothesis`) across various shapes, batch sizes, and datatypes.
+  - Essential for deep learning based registration or feature tracking pipelines.
+  - Gradients analytically derived and verified against numerical differentiation.
+
+- **Precision & Reliability**: 
+  - Supports `float32` and `float64`.
+  - Rigorously tested with `hypothesis` property-based testing.
 
 ## Installation
 
 **Prerequisites**:
-- Python 3.x
+- Python 3.8+
 - PyTorch (>= 1.7)
-- CUDA Toolkit (if building with GPU support)
-- C++17 compatible compiler (MSVC on Windows, GCC/Clang on Linux)
+- CUDA Toolkit (11.x+)
+- C++17 compatible compiler
 
-### Build and Install
+### Build from Source
 
 ```bash
+# Install with pip
 pip install .
-```
 
-To build in editable mode for development:
-
-```bash
+# For development (editable mode)
 pip install -e . --no-build-isolation
 ```
 
 ## Usage
 
-The library exposes a simple functional API `fft_cc`.
+### Zero-Normalized Cross-Correlation (ZNCC)
+
+This is the primary operator for robust template matching.
 
 ```python
 import torch
-from torch_cireg import fft_cc
+from torch_cireg import fft_zncc
 
-# Define input tensors
-# Shape: [Batch, Channels, Height, Width]
+# Define input tensors [Batch, Channels, Height, Width]
 B, C, H, W = 1, 1, 1024, 1024
 h, w = 128, 128
 
 image = torch.randn(B, C, H, W, device='cuda', requires_grad=True)
 kernel = torch.randn(B, C, h, w, device='cuda', requires_grad=True)
 
-# Compute Cross-Correlation
-output = fft_cc(image, kernel)
+# Compute ZNCC
+# Output values are in range [-1, 1]
+output = fft_zncc(image, kernel)
 
-# Dimensions: [Batch, H - h + 1, W - w + 1] (Valid padding)
-print(f"Output shape: {output.shape}") 
+print(f"ZNCC Output shape: {output.shape}") # [B, H-h+1, W-w+1]
 
-# Compute Gradients
-loss = output.sum()
+# Backpropagation
+loss = (1 - output.max()).mean()
 loss.backward()
 
 print(f"Image Grad: {image.grad.shape}")
 print(f"Kernel Grad: {kernel.grad.shape}")
 ```
 
-## Testing
+### Standard Cross-Correlation & Local Std
 
-The project uses `pytest` and `hypothesis` for robust testing.
+You can also access the low-level operators directly:
 
-```bash
-pytest
+```python
+from torch_cireg import fft_cc, local_std
+
+# 1. Standard FFT Cross-Correlation
+cc = fft_cc(image, kernel)
+
+# 2. Local Standard Deviation Map
+# Computes std dev of 'image' within windows of size 'kernel'
+ones_kernel = torch.ones_like(kernel)
+std_map = local_std(image, ones_kernel)
 ```
 
-Tests cover:
-- CPU and CUDA implementations.
-- Correctness vs Naive spatial loop implementation.
-- Gradient checks (Autograd).
-- Variable batch sizes and aspect ratios.
-- Edge cases (small inputs).
+## Architecture
 
-## Implementation Details
+The implementation is split into a Python wrapper and C++/CUDA backend:
 
-The core computation relies on the convolution theorem:
-$$ I \star K = \mathcal{F}^{-1}(\mathcal{F}(I) \cdot \overline{\mathcal{F}(K)}) $$
+- **`torch_cireg` (Python)**: Main entry point and type checking.
+- **`cuda_kernels` (C++/CUDA)**:
+  - **`fft_cc`**: Core FFT convolution logic using cuFFT `PlanMany`.
+  - **`local_std`**: Methods to compute local windowed variance using mean-of-squares minus square-of-means approach, optimized with fused kernels.
+  - **`fft_zncc`**: orchestrator that chains normalization and correlation.
 
-For the backward pass (gradients), we implement efficient analytic gradients using convolution/correlation transposition rules, batched into a single FFT execution context to minimize launch overheads and memory fragmentation.
+## Testing
 
-See [GRADIENTS.md](GRADIENTS.md) for the mathematical derivation of the gradients.
+Run the test suite to verify installation and correctness:
+
+```bash
+# Run all tests
+pytest
+
+# Run generic benchmarks
+pytest tests/test_cc.py tests/test_local_std.py
+```
+
+## Documentation
+
+- [GRADIENTS.md](GRADIENTS.md): Derivations of gradients for Cross-Correlation.
+- [NORMALIZATION.md](NORMALIZATION.md): Detail on the ZNCC formula and local standard deviation derivatives.

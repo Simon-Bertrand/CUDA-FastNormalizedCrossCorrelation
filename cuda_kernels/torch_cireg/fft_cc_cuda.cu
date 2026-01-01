@@ -82,16 +82,12 @@ public:
 
         // Setup for Multi-Batch Plan
         if (inplace) {
-             // In-Place Layout:
-             // Real Array is padded to [H, 2 * W_c]
-             // Complex Array is [H, W_c]
-             // They share the same memory.
+             // In-Place Layout: Real [H, 2*W_c], Complex [H, W_c] share memory.
              int width_real_padded = 2 * width_complex;
              
              // Stride config for Reals (input of R2C, output of C2R)
-             // We interpret the memory as having a "row stride" of width_real_padded elements.
              int real_embed[] = {height, width_real_padded}; 
-             int real_dist = height * width_real_padded; // Elements between batches
+             int real_dist = height * width_real_padded; 
 
              // Stride config for Complex
              int comp_embed[] = {height, width_complex};
@@ -245,29 +241,11 @@ __global__ void pack_bwd_inplace_kernel(
     int c = idx % W;
 
 
-    // G parts: 2B..3B-1
-    // Let's stick to simple "Plane" indexing
-    
-    // Buffer has 3 * B planes.
-    // Plane 0 + 3b: Image
-    // Plane 1 + 3b: Kernel
-    // Plane 2 + 3b: Grad
-    // But cufftExec is simpler if planes are grouped: All I, then All K, then All G?
-    // No, standard multi-batch PlanMany assumes uniform stride.
-    // So "batch_stride" is constant.
-    // If we interleave I, K, G, I, K, G... then `p` in {0,1,2}.
-    // Stride between planes is `batch_stride`.
-    // Stride between B batches? 
-    // PlanMany logic:
-    // type, batch_size.
-    // It assumes contiguous blocks of data for each batch if `embed` and `dist` are set standard.
-    // In `_impl`, we allocated B * 3 contiguous planes.
-    // 0..3B-1.
-    // Let's map: 
+    // Buffer Layout:
     // Plane 0..B-1: Image
     // Plane B..2B-1: Kernel
     // Plane 2B..3B-1: Grad
-    // This allows using one PlanMany(batch=3B).
+    // Stride between planes is `batch_stride_buffer`.
     
     int flat_buffer_idx = r * row_stride_buffer + c;
 
