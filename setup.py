@@ -70,6 +70,9 @@ if os.path.exists(cuda_kernels_dir):
                  if has_cuda_code:
                      print(f"Warning: CUDA files found in {kernel_dir} but nvcc is missing. Compiling CPU only.")
             
+            # Include dirs
+            include_dirs = [os.path.abspath(os.path.join(kernel_path, 'include'))]
+
             # Create Extension
             ext_name = kernel_dir
             if build_with_cuda:
@@ -77,6 +80,7 @@ if os.path.exists(cuda_kernels_dir):
                     ext_name,
                     sources,
                     libraries=libraries,
+                    include_dirs=include_dirs,
                     define_macros=define_macros,
                     extra_compile_args=extra_compile_args
                 ))
@@ -84,6 +88,7 @@ if os.path.exists(cuda_kernels_dir):
                 ext_modules.append(CppExtension(
                     ext_name,
                     sources,
+                    include_dirs=include_dirs,
                     define_macros=define_macros,
                     extra_compile_args=extra_compile_args
                 ))

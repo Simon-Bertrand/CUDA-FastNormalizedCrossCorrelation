@@ -4,7 +4,7 @@ import pytest
 import time
 from hypothesis import strategies as st, given, settings
 from .utils import naive_local_std
-from torch_cireg import local_std
+from torch_bidimcc import local_std
 
 @settings(max_examples=50, deadline=None)
 @given(

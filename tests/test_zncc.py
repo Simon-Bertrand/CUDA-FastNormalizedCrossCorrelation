@@ -4,7 +4,7 @@ import pytest
 import warnings
 from hypothesis import strategies as st, given, settings
 from .utils import naive_zncc
-from torch_cireg import fft_zncc
+from torch_bidimcc import fft_zncc
 
 @settings(max_examples=50, deadline=None)
 @given(

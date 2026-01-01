@@ -4,7 +4,7 @@ import pytest
 import time
 from hypothesis import strategies as st, given, settings
 from .utils import naive_cc
-from torch_cireg import fft_cc
+from torch_bidimcc import fft_cc
 
 @settings(max_examples=50, deadline=None)
 @given(

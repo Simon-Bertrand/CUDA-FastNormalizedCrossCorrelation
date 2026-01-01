@@ -1,4 +1,4 @@
-# Torch CiReg: Fast FFT ZNCC & Cross-Correlation for PyTorch
+# Torch BiDimCC: Fast FFT ZNCC & Cross-Correlation for PyTorch
 
 This repository contains a high-performance **PyTorch C++/CUDA Extension** for computing **Zero-Normalized Cross-Correlation (ZNCC)** and standard Cross-Correlation using Fast Fourier Transforms (FFT).
 
@@ -9,11 +9,11 @@ It allows for extremely fast image template matching and registration tasks, off
 - **Zero-Normalized Cross-Correlation (ZNCC)**:
   - Robust matching invariant to local brightness and contrast changes.
   - Efficiently computes:
-    $$ZNCC(I, K) = \frac{(I - \mu_{local}) \cdot (K - \mu_{global}) / \sigma_{global}}{\sigma_{local} \cdot \sqrt{N}}$$
+    $$ ZNCC(I, K) = \frac{(I - \mu_{local}) \cdot (K - \mu_{global}) / \sigma_{global}}{\sigma_{local} \cdot \sqrt{N}} $$
   - Uses a **Fused CUDA Kernel** to compute local standard deviation maps rapidly.
   
 - **Standard Cross-Correlation**:
-  - Efficient FFT-based computation: $O = I \star K$.
+  - Efficient FFT-based computation: $O = `I \star K`.
   
 - **Performance Optimized**:
   - **CUDA**: Custom kernels utilizing `cuFFT` with batched R2C transforms and in-place operations to minimize memory usage.
@@ -55,7 +55,7 @@ This is the primary operator for robust template matching.
 
 ```python
 import torch
-from torch_cireg import fft_zncc
+from torch_bidimcc import fft_zncc
 
 # Define input tensors [Batch, Channels, Height, Width]
 B, C, H, W = 1, 1, 1024, 1024
@@ -83,7 +83,7 @@ print(f"Kernel Grad: {kernel.grad.shape}")
 You can also access the low-level operators directly:
 
 ```python
-from torch_cireg import fft_cc, local_std
+from torch_bidimcc import fft_cc, local_std
 
 # 1. Standard FFT Cross-Correlation
 cc = fft_cc(image, kernel)
@@ -98,7 +98,7 @@ std_map = local_std(image, ones_kernel)
 
 The implementation is split into a Python wrapper and C++/CUDA backend:
 
-- **`torch_cireg` (Python)**: Main entry point and type checking.
+- **`torch_bidimcc` (Python)**: Main entry point and type checking.
 - **`cuda_kernels` (C++/CUDA)**:
   - **`fft_cc`**: Core FFT convolution logic using cuFFT `PlanMany`.
   - **`local_std`**: Methods to compute local windowed variance using mean-of-squares minus square-of-means approach, optimized with fused kernels.
