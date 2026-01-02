@@ -5,7 +5,7 @@
 
 TODO.md
 lab
-**/*.ipynb
+dbg.ipynb
 .vscode
 **/*.pyo
 **/*.pyd
