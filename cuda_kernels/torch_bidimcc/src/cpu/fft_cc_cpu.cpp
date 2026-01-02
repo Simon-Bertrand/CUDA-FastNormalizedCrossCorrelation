@@ -385,7 +385,7 @@ std::vector<torch::Tensor> fft_cc_backward_cpu_impl(
         dI = spatial.select(1, 0).contiguous().reshape(image.sizes());
         auto dT = spatial.select(1, 1).slice(1, 0, h).slice(2, 0, w);
         if (broadcast_kernel) {
-            dK = dT.sum(0, true);
+            dK = dT.sum(0, true).reshape(kernel.sizes());
         } else {
              dK = dT.contiguous().reshape(kernel.sizes());
         }
@@ -404,7 +404,7 @@ std::vector<torch::Tensor> fft_cc_backward_cpu_impl(
     } else {
         auto dT = spatial.select(1, 0).slice(1, 0, h).slice(2, 0, w);
         if (broadcast_kernel) {
-             dK = dT.sum(0, true);
+             dK = dT.sum(0, true).reshape(kernel.sizes());
         } else {
              dK = dT.contiguous().reshape(kernel.sizes());
         }

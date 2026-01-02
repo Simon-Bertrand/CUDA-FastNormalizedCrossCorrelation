@@ -619,7 +619,7 @@ std::vector<torch::Tensor> _fft_cc_backward_cuda_impl(torch::Tensor grad_output,
 
     if (compute_dK) {
         if (broadcast_kernel) {
-            dK = dK_expanded.sum(0, true);
+            dK = dK_expanded.sum(0, true).reshape(kernel.sizes());
         } else {
             dK = dK_expanded.contiguous().reshape(kernel.sizes());
         }
